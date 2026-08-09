@@ -17,6 +17,7 @@ description: Iced Todos 桌面待办应用 —— Rust + iced 0.14（Elm 架构�
 - 项目侧边栏可**收起 / 展开**（纯 UI 状态，不持久化，启动默认收起）
 - 项目通过「＋ 添加项目」**弹窗**创建（名称必填），可带可选**起止时间**（侧边栏小字展示，内联编辑可改）
 - 任务区**双列分组**：左=未开始、右=进行中（组内按截止时间排序）；已完成经侧边栏按钮弹窗归档；任务添加统一走「＋ 添加任务」弹窗
+- 任务 / 项目可带可选**优先级**（无/低/中/高）；任务与项目列表可切换排序（优先级 / 截止日期 / 综合），偏好**持久化**到数据文件
 - 进行中任务显示**每秒实时**刷新耗时
 - 任务列表 JSON 持久化，重启不丢失
 - 深色主题，中文界面
@@ -69,13 +70,15 @@ docs/
 4. **持久化 fire-and-forget**：每次状态变更后把整个 `Store`（todos + projects）`serde_json::to_string_pretty` 序列化，经 `Task::perform(storage::save, Message::Saved)` 异步写盘；`Saved` 成功消息静默，失败写入 `app.error`。不引入增量同步。
 5. **数据向后兼容**：`Todo.project_id` 与 `Todo.description` 带 `#[serde(default)]`；`storage::load` 对旧版纯数组格式自动迁移为 `Store`，不得破坏旧数据。
 6. **项目语义**：项目名 trim 后非空且不重名；项目添加走弹窗（`OpenProjectDialog` / `SubmitProjectDialog`），可带可选起止时间（`Project.started_at` / `finished_at`，`#[serde(default)]` 兼容旧数据；**开始必须早于结束**）；编辑走侧边栏**内联表单**（`StartEditProject` / `SaveEditProject`，名称 + 起止时间可改，**重名校验排除自身**）；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
-7. **新任务插在最前**（`todos.insert(0, ...)`）；**任务添加统一走「＋ 添加任务」弹窗**（`SubmitAddDialog`，`App.input` / 快捷输入行已移除）；标题 / 描述 / 项目名输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）；弹窗校验不过（空白标题 / 截止时间格式非法 / 项目不存在）时弹窗保持打开、输入保留；时间取自 `app.now`。
+7. **新任务插在最前**（`todos.insert(0, ...)`）；**任务添加统一走「＋ 添加任务」弹窗**（`SubmitAddDialog`，`App.input` / 快捷输入行已移除）；标题 / 描述 / 项目名输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）；优先级（`Option<Priority>`）在弹窗 / 编辑表单设置，未设置不显示徽章、排序排最后；弹窗校验不过（空白标题 / 截止时间格式非法 / 项目不存在）时弹窗保持打开、输入保留；时间取自 `app.now`。
 8. **侧边栏收放、弹窗表单、归档开关与编辑表单是纯 UI 状态**（`App.sidebar_visible` / `App.add_dialog` / `App.project_dialog` / `App.show_completed` / `App.project_edit` / `App.todo_edit`）：只存内存、**不参与持久化**，启动默认收起 / 关闭 / 无编辑；`ToggleSidebar`、各弹窗与编辑表单的打开/关闭/输入变化均不触发落盘（`SubmitAddDialog` 创建成功、`SubmitProjectDialog` 创建成功、`SaveEditProject` / `SaveEditTodo` 保存成功才落盘）；任务 / 项目 / 归档三个弹窗**互斥**（打开一个关闭其余）。
+    **例外：排序偏好持久化**（`App.sort_mode` / `App.project_sort_mode`，R22/R24）——随 Store 落盘（`Store.sort_mode` / `project_sort_mode`，serde 缺省兼容旧文件）、启动经 `Loaded` 恢复，`SortModeChanged` / `ProjectSortModeChanged` 切换即触发落盘。
 9. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。
 10. **错误不崩溃**：数据文件缺失视为空数据；损坏 JSON 返回错误并显示在 UI（`app.error`），绝不 panic。
 11. **UI 文案与代码注释使用中文**；模块级 `//!` + 公开项 `///` 文档注释是标配。
 12. **卡片默认只读，修改须进编辑模式**：主界面任务卡片全部属性只读展示（项目归属也是只读文字，无 `AssignProject` 消息——归属只能经编辑模式保存）；点击「编辑」进入该卡片的编辑模式（即"当前任务"，`App.todo_edit`），可改标题 / 描述 / 项目 / 截止时间，保存校验同弹窗；**时间字段（创建 / 开始 / 结束）永不直接编辑**（自动记录，状态由它们推导）；切换编辑其他卡片时未保存修改被丢弃。
-13. **双列分组与归档**：任务区双列——左=未开始、右=进行中（各自独立滚动，组内按截止时间升序、无截止排后、稳定排序，`Todo::due_order_key` 为排序键）；已完成任务不进双列，经侧边栏「已完成 (N)」按钮弹窗归档（按 `finished_at` 降序）；分组 / 排序属派生展示，放 view 内部私有函数，update 层不改列表顺序。
+13. **双列分组与归档**：任务区双列——左=未开始、右=进行中（各自独立滚动，组内按排序偏好排序、未设置均排最后、稳定排序，`Todo::due_order_key` / `priority_order_key` / `combined_order_key` 为排序键）；已完成任务不进双列，经侧边栏「已完成 (N)」按钮弹窗归档（按 `finished_at` 降序，**不受排序偏好影响**）；分组 / 排序属派生展示，放 view 内部私有函数，update 层不改列表顺序。
+14. **排序偏好与优先级**：任务区与侧边栏各自独立排序下拉（`sort_mode` / `project_sort_mode`，值：优先级 / 截止日期 / 综合=优先级优先同级按截止）；「综合」的截止键：任务=`due_at`、项目=`finished_at`（项目结束时间即截止日期）；「全部」行恒在项目列表最前；优先级展示：卡片徽章「高/中/低」（高红/中橙/低灰）、侧边栏项目行彩色圆点；`Priority`（低<中<高）与 `SortMode`（JSON 存英文变体名，缺省 `Combined`）派生 `Serialize/Deserialize/Default`。
 
 ## 5. 代码风格
 

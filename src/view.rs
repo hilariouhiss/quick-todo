@@ -13,7 +13,7 @@ use iced::widget::{
 use iced::{Alignment, Background, Border, Color, Element, Font, Length};
 use uuid::Uuid;
 
-use crate::model::{App, Project, QuickDue, Todo, TodoStatus};
+use crate::model::{App, Priority, Project, QuickDue, SortMode, Todo, TodoStatus};
 use crate::update::Message;
 
 /// 次要文本（标签、提示）颜色：中性灰
@@ -40,6 +40,86 @@ pub(crate) const PROJECT_EDIT_NAME_ID: iced::widget::Id =
 
 /// 弹窗截止时间的快捷选项（选中后回填到文本输入框，仍可手动修改）
 const QUICK_DUE_OPTIONS: [QuickDue; 3] = [QuickDue::Today, QuickDue::Tomorrow, QuickDue::Sunday];
+
+/// 排序方式下拉的固定选项（任务区与侧边栏共用）。
+const SORT_MODES: [SortMode; 3] = [SortMode::Priority, SortMode::Due, SortMode::Combined];
+
+/// 优先级下拉的选项（"无" + 低 / 中 / 高）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PriorityChoice {
+    value: Option<Priority>,
+    label: &'static str,
+}
+
+impl PriorityChoice {
+    /// "无"选项。
+    const NONE: Self = Self {
+        value: None,
+        label: "无",
+    };
+
+    /// 由优先级构造选项（`None` = "无"）。
+    const fn of(value: Option<Priority>) -> Self {
+        match value {
+            None => Self::NONE,
+            Some(priority) => Self {
+                value: Some(priority),
+                label: priority.label(),
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for PriorityChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label)
+    }
+}
+
+/// 优先级下拉组件（任务 / 项目弹窗与编辑表单共用）。
+fn priority_picker<'a>(
+    selected: Option<Priority>,
+    on_select: fn(Option<Priority>) -> Message,
+) -> Element<'a, Message> {
+    PickList::new(
+        &[
+            PriorityChoice::NONE,
+            PriorityChoice {
+                value: Some(Priority::Low),
+                label: "低",
+            },
+            PriorityChoice {
+                value: Some(Priority::Medium),
+                label: "中",
+            },
+            PriorityChoice {
+                value: Some(Priority::High),
+                label: "高",
+            },
+        ][..],
+        Some(PriorityChoice::of(selected)),
+        move |choice| on_select(choice.value),
+    )
+    .text_size(13)
+    .padding([4, 8])
+    .width(Length::Fill)
+    .into()
+}
+
+/// 优先级徽章 / 圆点颜色：高=红、中=橙、低=灰。
+fn priority_color(priority: Priority) -> Color {
+    match priority {
+        Priority::High => ERROR_COLOR,
+        Priority::Medium => ACCENT,
+        Priority::Low => MUTED,
+    }
+}
+
+impl std::fmt::Display for SortMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
 
 const BOLD: Font = Font {
     weight: Weight::Bold,
@@ -84,6 +164,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if let Some(error) = &app.error {
         body = body.push(text(error.as_str()).size(12).color(ERROR_COLOR));
     }
+
+    // 任务排序选择行（控制两列的组内排序）
+    body = body.push(sort_picker_row(app));
 
     // 按当前筛选的项目过滤任务列表，再按状态分列（已完成归档到弹窗）
     let visible: Vec<&Todo> = app
@@ -194,6 +277,17 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     .spacing(6)
     .align_y(Alignment::Center);
 
+    // 优先级（可选）：下拉
+    let priority_row = row![
+        text("优先级")
+            .size(13)
+            .color(MUTED)
+            .width(Length::Fixed(72.0)),
+        priority_picker(dialog.priority, Message::DialogPriorityChanged),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
     // 截止时间：文本输入（实时校验）+ 快捷下拉（回填后仍可手动修改）
     let due_row = row![
         text("截止时间")
@@ -225,6 +319,7 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         form_field("标题", title_input),
         form_field("描述", description_input),
         project_picker,
+        priority_row,
         due_row,
     ]
     .spacing(10);
@@ -299,6 +394,10 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         form_field("名称", name_input),
         form_field("开始时间", start_input),
         form_field("结束时间", end_input),
+        form_field(
+            "优先级",
+            priority_picker(dialog.priority, Message::ProjectDialogPriorityChanged),
+        ),
     ]
     .spacing(10);
 
@@ -454,6 +553,25 @@ fn empty_hint(message: &'static str) -> Element<'static, Message> {
         .into()
 }
 
+/// 任务区排序选择行（右对齐）：控制未开始 / 进行中两列的组内排序。
+fn sort_picker_row(app: &App) -> Element<'_, Message> {
+    row![
+        Space::new().width(Length::Fill),
+        text("排序").size(13).color(MUTED),
+        Space::new().width(6),
+        PickList::new(
+            &SORT_MODES[..],
+            Some(app.sort_mode),
+            Message::SortModeChanged
+        )
+        .text_size(13)
+        .padding([4, 8]),
+    ]
+    .align_y(Alignment::Center)
+    .spacing(6)
+    .into()
+}
+
 // ---------- 项目侧边栏 ----------
 
 /// 左侧项目侧边栏：「＋ 添加项目」按钮 + 可滚动项目列表（"全部" + 各项目），头部可收起。
@@ -472,6 +590,20 @@ fn project_sidebar(app: &App) -> Element<'_, Message> {
             .style(button::secondary)
             .padding([8, 12])
             .width(Length::Fill),
+        // 项目排序选择行（持久化偏好）
+        row![
+            text("排序").size(11).color(MUTED),
+            PickList::new(
+                &SORT_MODES[..],
+                Some(app.project_sort_mode),
+                Message::ProjectSortModeChanged,
+            )
+            .text_size(11)
+            .padding([2, 6])
+            .width(Length::Fill),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(4),
         Space::new().height(2),
     ]
     .spacing(8);
@@ -485,7 +617,14 @@ fn project_sidebar(app: &App) -> Element<'_, Message> {
                 .width(Length::Fill),
         );
     } else {
-        for project in &app.projects {
+        // 项目列表按 project_sort_mode 排序（"全部"行恒在最前）
+        let mut projects: Vec<&Project> = app.projects.iter().collect();
+        match app.project_sort_mode {
+            SortMode::Priority => projects.sort_by_key(|p| p.priority_order_key()),
+            SortMode::Due => projects.sort_by_key(|p| p.end_order_key()),
+            SortMode::Combined => projects.sort_by_key(|p| p.combined_order_key()),
+        }
+        for project in projects {
             let count = app
                 .todos
                 .iter()
@@ -570,6 +709,11 @@ fn project_row<'a>(
                 &edit.end_input,
                 Message::ProjectEditEndChanged,
             ),
+            column![
+                text("优先级").size(11).color(MUTED),
+                priority_picker(edit.priority, Message::ProjectEditPriorityChanged),
+            ]
+            .spacing(2),
         ]
         .spacing(4);
 
@@ -614,16 +758,22 @@ fn project_row<'a>(
 
     let selected = app.selected_project == id;
 
-    let mut actions = row![
-        button(text(name).size(13))
-            .on_press(Message::SelectProject(id))
-            .style(button::text)
-            .padding([4, 2])
-            .width(Length::Fill),
-        text(count.to_string()).size(12).color(MUTED),
-    ]
-    .align_y(Alignment::Center)
-    .spacing(6);
+    let mut actions = row![].align_y(Alignment::Center).spacing(6);
+    // 优先级圆点：仅项目行（"全部"行无归属项目）且设置了优先级时显示
+    if let Some(project) = id.and_then(|id| app.projects.iter().find(|p| p.id == id))
+        && let Some(priority) = project.priority
+    {
+        actions = actions.push(text("●").size(10).color(priority_color(priority)));
+    }
+    actions = actions
+        .push(
+            button(text(name).size(13))
+                .on_press(Message::SelectProject(id))
+                .style(button::text)
+                .padding([4, 2])
+                .width(Length::Fill),
+        )
+        .push(text(count.to_string()).size(12).color(MUTED));
 
     // 项目行才有"编辑 / 删除"；"全部"行没有
     if let Some(project_id) = id {
@@ -717,7 +867,7 @@ fn project_row_style(theme: &iced::Theme, selected: bool) -> container::Style {
 // ---------- 任务列表 ----------
 
 /// 双列分组显示：左列=未开始、右列=进行中，各自独立滚动；
-/// 组内按截止时间升序（无截止排后，稳定排序）；已完成任务不在此显示（见归档弹窗）。
+/// 组内按 `sort_mode` 排序（优先级 / 截止日期 / 综合，未设置均排最后）；已完成任务不在此显示（见归档弹窗）。
 fn grouped_columns<'a>(app: &'a App, todos: Vec<&'a Todo>) -> Element<'a, Message> {
     if todos.is_empty() {
         return empty_hint(if app.selected_project.is_some() {
@@ -732,14 +882,27 @@ fn grouped_columns<'a>(app: &'a App, todos: Vec<&'a Todo>) -> Element<'a, Messag
         .copied()
         .filter(|todo| todo.status() == TodoStatus::Pending)
         .collect();
-    pending.sort_by_key(|todo| todo.due_order_key());
-
     let mut in_progress: Vec<&Todo> = todos
         .iter()
         .copied()
         .filter(|todo| todo.status() == TodoStatus::InProgress)
         .collect();
-    in_progress.sort_by_key(|todo| todo.due_order_key());
+
+    // 组内排序：按当前选择的排序方式（稳定排序，未设置均排最后）
+    match app.sort_mode {
+        SortMode::Priority => {
+            pending.sort_by_key(|todo| todo.priority_order_key());
+            in_progress.sort_by_key(|todo| todo.priority_order_key());
+        }
+        SortMode::Due => {
+            pending.sort_by_key(|todo| todo.due_order_key());
+            in_progress.sort_by_key(|todo| todo.due_order_key());
+        }
+        SortMode::Combined => {
+            pending.sort_by_key(|todo| todo.combined_order_key());
+            in_progress.sort_by_key(|todo| todo.combined_order_key());
+        }
+    }
 
     row![
         group_column("未开始", "暂无未开始任务", pending, app),
@@ -789,17 +952,27 @@ fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         return todo_card_editor(todo, app);
     }
 
-    let head = row![
+    let mut head = row![
         text(todo.title.as_str()).size(16).font(BOLD),
         Space::new().width(Length::Fill),
-        text(todo.status().label())
-            .size(12)
-            .color(status_color(todo.status())),
-        Space::new().width(8),
-        actions(todo),
     ]
     .align_y(Alignment::Center)
     .spacing(8);
+    // 优先级徽章：未设置不显示
+    if let Some(priority) = todo.priority {
+        head = head.push(
+            text(priority.label())
+                .size(11)
+                .color(priority_color(priority)),
+        );
+    }
+    head = head
+        .push(
+            text(todo.status().label())
+                .size(12)
+                .color(status_color(todo.status())),
+        )
+        .push(actions(todo));
 
     // 描述：非空时在标题下方以灰色小字显示（自动换行）
     let mut content = column![head].spacing(8);
@@ -950,6 +1123,17 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     .spacing(6)
     .align_y(Alignment::Center);
 
+    // 优先级（可选）：下拉
+    let priority_row = row![
+        text("优先级")
+            .size(13)
+            .color(MUTED)
+            .width(Length::Fixed(72.0)),
+        priority_picker(edit.priority, Message::EditPriorityChanged),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
     // 截止时间：文本输入（实时校验）+ 快捷下拉（回填后仍可手动修改）
     let due_row = row![
         text("截止时间")
@@ -986,7 +1170,14 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     .spacing(8);
 
     // 表单主体；截止时间格式错误时追加红字提示
-    let mut form = column![head, description_input, project_picker, due_row].spacing(8);
+    let mut form = column![
+        head,
+        description_input,
+        project_picker,
+        priority_row,
+        due_row
+    ]
+    .spacing(8);
     if let Err(hint) = &edit.due_parsed {
         form = form.push(text(hint.as_str()).size(12).color(ERROR_COLOR));
     }

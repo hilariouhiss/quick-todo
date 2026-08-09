@@ -30,9 +30,63 @@ impl TodoStatus {
     }
 }
 
-/// 一条任务记录：标题 + 可选描述 + 归属项目 + 截止时间 + 三个关键时间点。
+/// 优先级：低 / 中 / 高（派生 Ord，排序用；`Option` 的 `None` = 未设置）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Priority {
+    /// 低
+    Low,
+    /// 中
+    Medium,
+    /// 高
+    High,
+}
+
+impl Priority {
+    /// 优先级的中文显示名。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Priority::Low => "低",
+            Priority::Medium => "中",
+            Priority::High => "高",
+        }
+    }
+}
+
+/// 组内排序方式：优先级 / 截止日期 / 综合（优先级优先、同级按截止日期）。
+/// 序列化存英文变体名（随 Store 持久化，缺省 `Combined` 兼容旧文件）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SortMode {
+    /// 按优先级：高→低，未设置排最后
+    Priority,
+    /// 按截止日期：升序，未设置排最后
+    Due,
+    /// 综合：优先级优先，同级按截止日期
+    #[default]
+    Combined,
+}
+
+impl SortMode {
+    /// 排序方式的中文显示名。
+    pub const fn label(self) -> &'static str {
+        match self {
+            SortMode::Priority => "优先级",
+            SortMode::Due => "截止日期",
+            SortMode::Combined => "综合",
+        }
+    }
+}
+
+/// 综合排序键：优先级（高→低、未设置最后）+ 时间（截止 / 结束，升序、未设置最后）。
+/// 任务与项目共用（时间键分别取 `due_at` / `finished_at`）。
+pub type CombinedOrderKey = (
+    (bool, Option<std::cmp::Reverse<Priority>>),
+    (bool, Option<DateTime<Utc>>),
+);
+
+/// 一条任务记录：标题 + 可选描述 + 可选优先级 + 归属项目 + 截止时间 + 三个关键时间点。
 ///
 /// - `description`：可选描述（空串 = 无描述，创建时填写，卡片只读显示）
+/// - `priority`：可选优先级（`None` = 未设置，卡片不显示徽章、排序排最后）
 /// - `project_id`：所属项目（可选，`None` 表示未归属）
 /// - `due_at`：截止时间（可选，`None` 表示无截止；由弹窗添加时设置）
 /// - `created_at`：创建时间（添加任务时自动记录，不可为空）
@@ -48,6 +102,10 @@ pub struct Todo {
     /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
     #[serde(default)]
     pub description: String,
+    /// 可选优先级（`None` = 未设置）。
+    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
+    #[serde(default)]
+    pub priority: Option<Priority>,
     /// 所属项目（`None` = 未归属）。
     /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
     #[serde(default)]
@@ -62,16 +120,17 @@ pub struct Todo {
 }
 
 impl Todo {
-    /// 创建一条**仅标题**的新任务（无描述 / 无项目 / 无截止时间；
+    /// 创建一条**仅标题**的新任务（无描述 / 无优先级 / 无项目 / 无截止时间；
     /// 弹窗提交的纯标题场景使用，全字段走 `new_full`）。
     pub fn new(title: String, now: DateTime<Utc>) -> Self {
-        Self::new_full(title, String::new(), None, None, now)
+        Self::new_full(title, String::new(), None, None, None, now)
     }
 
-    /// 创建一条完整配置的新任务（弹窗添加用）：描述 + 归属项目 + 截止时间。
+    /// 创建一条完整配置的新任务（弹窗添加用）：描述 + 优先级 + 归属项目 + 截止时间。
     pub fn new_full(
         title: String,
         description: String,
+        priority: Option<Priority>,
         project_id: Option<Uuid>,
         due_at: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
@@ -80,6 +139,7 @@ impl Todo {
             id: Uuid::now_v7(),
             title,
             description,
+            priority,
             project_id,
             due_at,
             created_at: now,
@@ -116,16 +176,35 @@ impl Todo {
     pub fn due_order_key(&self) -> (bool, Option<DateTime<Utc>>) {
         (self.due_at.is_none(), self.due_at)
     }
+
+    /// 优先级排序键：高→低，**未设置排最后**。
+    /// 返回 `(是否未设置, 反转优先级)`，`Reverse` 使高优先级排前。
+    pub fn priority_order_key(&self) -> (bool, Option<std::cmp::Reverse<Priority>>) {
+        (
+            self.priority.is_none(),
+            self.priority.map(std::cmp::Reverse),
+        )
+    }
+
+    /// 综合排序键：**优先级优先**（高→低），同级按截止日期升序；未设置均排最后。
+    pub fn combined_order_key(&self) -> CombinedOrderKey {
+        (self.priority_order_key(), self.due_order_key())
+    }
 }
 
 /// 一个项目：任务的可选归属容器。
 ///
-/// - `started_at` / `finished_at`：可选起止时间（`None` = 未设置；仅创建时设置）
+/// - `priority`：可选优先级（`None` = 未设置，行内不显示圆点、排序排最后）
+/// - `started_at` / `finished_at`：可选起止时间（`None` = 未设置）
 /// - `created_at`：创建时间（创建时自动记录，不可为空）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: Uuid,
     pub name: String,
+    /// 可选优先级（`None` = 未设置）。
+    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
+    #[serde(default)]
+    pub priority: Option<Priority>,
     /// 项目开始时间（可选，`None` = 未设置）。
     /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
     #[serde(default)]
@@ -138,14 +217,15 @@ pub struct Project {
 }
 
 impl Project {
-    /// 创建一条新项目（无起止时间，此时即记录创建时间）。
+    /// 创建一条新项目（无优先级 / 无起止时间，此时即记录创建时间）。
     pub fn new(name: String, now: DateTime<Utc>) -> Self {
-        Self::new_full(name, None, None, now)
+        Self::new_full(name, None, None, None, now)
     }
 
-    /// 创建一条带可选起止时间的项目（弹窗添加用）。
+    /// 创建一条带可选优先级与起止时间的项目（弹窗添加用）。
     pub fn new_full(
         name: String,
+        priority: Option<Priority>,
         started_at: Option<DateTime<Utc>>,
         finished_at: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
@@ -153,10 +233,29 @@ impl Project {
         Self {
             id: Uuid::now_v7(),
             name,
+            priority,
             started_at,
             finished_at,
             created_at: now,
         }
+    }
+
+    /// 优先级排序键（同任务）：高→低，未设置排最后。
+    pub fn priority_order_key(&self) -> (bool, Option<std::cmp::Reverse<Priority>>) {
+        (
+            self.priority.is_none(),
+            self.priority.map(std::cmp::Reverse),
+        )
+    }
+
+    /// 截止日期排序键：按**结束时间**（项目截止）升序，未设置排最后。
+    pub fn end_order_key(&self) -> (bool, Option<DateTime<Utc>>) {
+        (self.finished_at.is_none(), self.finished_at)
+    }
+
+    /// 综合排序键：优先级优先，同级按结束时间；未设置均排最后。
+    pub fn combined_order_key(&self) -> CombinedOrderKey {
+        (self.priority_order_key(), self.end_order_key())
     }
 }
 
@@ -167,6 +266,8 @@ pub struct AddDialog {
     pub title: String,
     /// 描述输入
     pub description: String,
+    /// 优先级（`None` = 无）
+    pub priority: Option<Priority>,
     /// 所属项目（`None` = 无项目）
     pub project_id: Option<Uuid>,
     /// 截止时间输入框的原始文本
@@ -181,6 +282,7 @@ impl Default for AddDialog {
         Self {
             title: String::new(),
             description: String::new(),
+            priority: None,
             project_id: None,
             due_input: String::new(),
             due_parsed: Ok(None),
@@ -193,6 +295,8 @@ impl Default for AddDialog {
 pub struct ProjectDialog {
     /// 名称输入
     pub name: String,
+    /// 优先级（`None` = 无）
+    pub priority: Option<Priority>,
     /// 开始时间输入框的原始文本
     pub start_input: String,
     /// 开始时间的实时解析结果：
@@ -208,6 +312,7 @@ impl Default for ProjectDialog {
     fn default() -> Self {
         Self {
             name: String::new(),
+            priority: None,
             start_input: String::new(),
             start_parsed: Ok(None),
             end_input: String::new(),
@@ -223,6 +328,8 @@ pub struct ProjectEdit {
     pub project_id: Uuid,
     /// 名称输入
     pub name: String,
+    /// 优先级（`None` = 无）
+    pub priority: Option<Priority>,
     /// 开始时间输入框的原始文本
     pub start_input: String,
     /// 开始时间的实时解析结果（同 `ProjectDialog.start_parsed`）
@@ -243,6 +350,8 @@ pub struct TodoEdit {
     pub title: String,
     /// 描述输入
     pub description: String,
+    /// 优先级（`None` = 无）
+    pub priority: Option<Priority>,
     /// 所属项目（`None` = 无项目）
     pub project_id: Option<Uuid>,
     /// 截止时间输入框的原始文本
@@ -363,6 +472,10 @@ pub struct App {
     pub project_edit: Option<ProjectEdit>,
     /// 卡片编辑表单（`None` = 无卡片处于编辑态；纯内存状态，不持久化）
     pub todo_edit: Option<TodoEdit>,
+    /// 任务排序方式（**持久化偏好**，启动经 `Loaded` 恢复，缺省「综合」）
+    pub sort_mode: SortMode,
+    /// 项目排序方式（**持久化偏好**，启动经 `Loaded` 恢复，缺省「综合」）
+    pub project_sort_mode: SortMode,
 }
 
 impl Default for App {
@@ -379,6 +492,8 @@ impl Default for App {
             show_completed: false,
             project_edit: None,
             todo_edit: None,
+            sort_mode: SortMode::default(),
+            project_sort_mode: SortMode::default(),
         }
     }
 }
@@ -490,6 +605,150 @@ mod tests {
     }
 
     #[test]
+    fn priority_order_key_sorts_high_first_none_last() {
+        let now = dt(1_700_000_000);
+        let low = Todo::new("低".into(), now);
+        let mut medium = Todo::new("中".into(), now);
+        let mut high = Todo::new("高".into(), now);
+        medium.priority = Some(Priority::Medium);
+        high.priority = Some(Priority::High);
+
+        let mut keys = [
+            low.priority_order_key(),
+            medium.priority_order_key(),
+            high.priority_order_key(),
+        ];
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                high.priority_order_key(), // 高在前
+                medium.priority_order_key(),
+                low.priority_order_key(), // 未设置排最后
+            ]
+        );
+    }
+
+    #[test]
+    fn combined_order_key_priority_first_then_due() {
+        let now = dt(1_700_000_000);
+        // 高优先级 + 晚截止 应排在 中优先级 + 早截止 之前（优先级优先）
+        let mut high_late = Todo::new("高晚".into(), now);
+        high_late.priority = Some(Priority::High);
+        high_late.due_at = Some(dt(1_700_000_200));
+        let mut medium_early = Todo::new("中早".into(), now);
+        medium_early.priority = Some(Priority::Medium);
+        medium_early.due_at = Some(dt(1_700_000_100));
+        // 同优先级：早截止在前
+        let mut high_early = Todo::new("高早".into(), now);
+        high_early.priority = Some(Priority::High);
+        high_early.due_at = Some(dt(1_700_000_100));
+
+        let mut keys = [
+            high_late.combined_order_key(),
+            medium_early.combined_order_key(),
+            high_early.combined_order_key(),
+        ];
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                high_early.combined_order_key(),
+                high_late.combined_order_key(),
+                medium_early.combined_order_key(),
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_json_without_priority_defaults_to_none() {
+        // 旧版数据：没有 priority 字段，反序列化应自动落空
+        let json = r#"{
+            "id": "0195c7e0-0000-7000-8000-000000000001",
+            "title": "旧任务",
+            "created_at": "2026-01-01T10:00:00Z",
+            "started_at": null,
+            "finished_at": null
+        }"#;
+        let todo: Todo = serde_json::from_str(json).unwrap();
+        assert_eq!(todo.priority, None);
+
+        let project: Project = serde_json::from_str(
+            r#"{
+            "id": "0195c7e0-0000-7000-8000-000000000001",
+            "name": "旧项目",
+            "created_at": "2026-01-01T10:00:00Z"
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(project.priority, None);
+    }
+
+    #[test]
+    fn sort_mode_defaults_and_labels() {
+        assert_eq!(SortMode::default(), SortMode::Combined);
+        assert_eq!(SortMode::Priority.label(), "优先级");
+        assert_eq!(SortMode::Due.label(), "截止日期");
+        assert_eq!(SortMode::Combined.label(), "综合");
+        // JSON 存英文变体名（随 Store 持久化）
+        assert_eq!(serde_json::to_string(&SortMode::Due).unwrap(), "\"Due\"");
+        assert_eq!(
+            serde_json::from_str::<SortMode>("\"Combined\"").unwrap(),
+            SortMode::Combined
+        );
+    }
+
+    #[test]
+    fn priority_labels_are_readable() {
+        assert_eq!(Priority::Low.label(), "低");
+        assert_eq!(Priority::Medium.label(), "中");
+        assert_eq!(Priority::High.label(), "高");
+    }
+
+    #[test]
+    fn project_sort_keys_order_by_priority_and_end() {
+        let now = dt(1_700_000_000);
+        let mut high = Project::new("高".into(), now);
+        high.priority = Some(Priority::High);
+        let mut late = Project::new("晚结束".into(), now);
+        late.finished_at = Some(dt(1_700_000_200));
+        let mut early = Project::new("早结束".into(), now);
+        early.finished_at = Some(dt(1_700_000_100));
+
+        // end_order_key：升序、未设置排最后
+        let mut ends = [
+            high.end_order_key(),
+            late.end_order_key(),
+            early.end_order_key(),
+        ];
+        ends.sort();
+        assert_eq!(
+            ends,
+            [
+                early.end_order_key(),
+                late.end_order_key(),
+                high.end_order_key(),
+            ]
+        );
+
+        // combined_order_key：优先级优先，同级按结束时间
+        let mut combined = [
+            late.combined_order_key(),
+            early.combined_order_key(),
+            high.combined_order_key(),
+        ];
+        combined.sort();
+        assert_eq!(
+            combined,
+            [
+                high.combined_order_key(), // 高优先级在前
+                early.combined_order_key(),
+                late.combined_order_key(),
+            ]
+        );
+    }
+
+    #[test]
     fn todo_ids_are_unique() {
         let a = Todo::new("a".into(), dt(1));
         let b = Todo::new("b".into(), dt(2));
@@ -510,6 +769,7 @@ mod tests {
         let todo = Todo::new_full(
             "写方案".into(),
             "详细描述".into(),
+            Some(Priority::High),
             Some(project),
             Some(due),
             now,
@@ -517,13 +777,15 @@ mod tests {
 
         assert_eq!(todo.title, "写方案");
         assert_eq!(todo.description, "详细描述");
+        assert_eq!(todo.priority, Some(Priority::High));
         assert_eq!(todo.project_id, Some(project));
         assert_eq!(todo.due_at, Some(due));
         assert_eq!(todo.created_at, now);
         assert_eq!(todo.status(), TodoStatus::Pending);
 
-        // 无项目、无截止时间同样合法
-        let plain = Todo::new_full("简单任务".into(), "".into(), None, None, now);
+        // 无优先级、无项目、无截止时间同样合法
+        let plain = Todo::new_full("简单任务".into(), "".into(), None, None, None, now);
+        assert_eq!(plain.priority, None);
         assert_eq!(plain.project_id, None);
         assert_eq!(plain.due_at, None);
     }
@@ -704,15 +966,23 @@ mod tests {
         let now = dt(1_700_000_000);
         let start = dt(1_700_000_000);
         let finish = dt(1_700_100_000);
-        let project = Project::new_full("项目 A".into(), Some(start), Some(finish), now);
+        let project = Project::new_full(
+            "项目 A".into(),
+            Some(Priority::High),
+            Some(start),
+            Some(finish),
+            now,
+        );
 
         assert_eq!(project.name, "项目 A");
+        assert_eq!(project.priority, Some(Priority::High));
         assert_eq!(project.started_at, Some(start));
         assert_eq!(project.finished_at, Some(finish));
         assert_eq!(project.created_at, now);
 
-        // 起止时间均可缺省
-        let plain = Project::new_full("项目 B".into(), None, None, now);
+        // 优先级与起止时间均可缺省
+        let plain = Project::new_full("项目 B".into(), None, None, None, now);
+        assert_eq!(plain.priority, None);
         assert_eq!(plain.started_at, None);
         assert_eq!(plain.finished_at, None);
     }

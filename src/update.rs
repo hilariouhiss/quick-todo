@@ -9,8 +9,8 @@ use iced::Task;
 use uuid::Uuid;
 
 use crate::model::{
-    AddDialog, App, Project, ProjectDialog, ProjectEdit, QuickDue, Todo, TodoEdit, TodoStatus,
-    format_due, parse_datetime,
+    AddDialog, App, Priority, Project, ProjectDialog, ProjectEdit, QuickDue, SortMode, Todo,
+    TodoEdit, TodoStatus, format_due, parse_datetime,
 };
 use crate::storage::{self, Store};
 use crate::view::{DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID, PROJECT_EDIT_NAME_ID};
@@ -30,7 +30,11 @@ pub enum Message {
     Saved(Result<(), String>),
     /// 每秒时钟（携带当前 UTC 时间，用于实时耗时显示）
     Tick(DateTime<Utc>),
-    /// 打开弹窗添加项目（名称 + 可选起止时间）
+    /// 任务排序方式切换（持久化偏好，触发落盘）
+    SortModeChanged(SortMode),
+    /// 项目排序方式切换（持久化偏好，触发落盘）
+    ProjectSortModeChanged(SortMode),
+    /// 打开弹窗添加项目（名称 + 优先级 + 可选起止时间）
     OpenProjectDialog,
     /// 关闭弹窗添加项目（丢弃已填内容，不落盘）
     CloseProjectDialog,
@@ -40,6 +44,8 @@ pub enum Message {
     ProjectStartChanged(String),
     /// 弹窗：结束时间输入框变化（实时解析校验）
     ProjectEndChanged(String),
+    /// 弹窗：优先级下拉选择
+    ProjectDialogPriorityChanged(Option<Priority>),
     /// 弹窗：点击"创建"/回车（校验通过后创建项目并落盘）
     SubmitProjectDialog,
     /// 打开已完成归档弹窗（纯 UI 状态，不落盘）
@@ -54,6 +60,8 @@ pub enum Message {
     ProjectEditStartChanged(String),
     /// 编辑：结束时间输入框变化（实时解析校验）
     ProjectEditEndChanged(String),
+    /// 编辑：优先级下拉选择
+    ProjectEditPriorityChanged(Option<Priority>),
     /// 保存项目编辑（校验通过后就地更新并落盘）
     SaveEditProject,
     /// 取消项目编辑：退出编辑态
@@ -72,6 +80,8 @@ pub enum Message {
     EditDescriptionChanged(String),
     /// 编辑：项目下拉选择
     EditProjectChanged(Option<Uuid>),
+    /// 编辑：优先级下拉选择
+    EditPriorityChanged(Option<Priority>),
     /// 编辑：截止时间输入框变化（实时解析校验）
     EditDueChanged(String),
     /// 编辑：快捷时间下拉选择（回填到截止时间输入框）
@@ -92,6 +102,8 @@ pub enum Message {
     DialogDescriptionChanged(String),
     /// 弹窗：项目下拉选择
     DialogProjectChanged(Option<Uuid>),
+    /// 弹窗：优先级下拉选择
+    DialogPriorityChanged(Option<Priority>),
     /// 弹窗：截止时间输入框变化（实时解析校验）
     DialogDueChanged(String),
     /// 弹窗：快捷时间下拉选择（回填到截止时间输入框）
@@ -134,11 +146,26 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::Loaded(Ok(store)) => {
             app.todos = store.todos;
             app.projects = store.projects;
+            // 恢复持久化的排序偏好（旧文件缺省已在反序列化时取「综合」）
+            app.sort_mode = store.sort_mode;
+            app.project_sort_mode = store.project_sort_mode;
         }
         Message::Loaded(Err(error)) => app.error = Some(format!("加载数据失败: {error}")),
         Message::Saved(Ok(())) => {}
         Message::Saved(Err(error)) => app.error = Some(format!("保存数据失败: {error}")),
         Message::Tick(now) => app.now = now,
+
+        Message::SortModeChanged(mode) => {
+            // 排序偏好持久化：切换即落盘
+            app.sort_mode = mode;
+            return persist(app);
+        }
+
+        Message::ProjectSortModeChanged(mode) => {
+            // 排序偏好持久化：切换即落盘
+            app.project_sort_mode = mode;
+            return persist(app);
+        }
 
         Message::OpenProjectDialog => {
             // 弹窗互斥：打开项目弹窗时关闭任务弹窗与归档弹窗
@@ -176,6 +203,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
 
+        Message::ProjectDialogPriorityChanged(priority) => {
+            if let Some(dialog) = &mut app.project_dialog {
+                dialog.priority = priority;
+            }
+        }
+
         Message::SubmitProjectDialog => {
             // 校验不通过时恢复弹窗（保留用户输入），不产生任何副作用
             let Some(dialog) = app.project_dialog.take() else {
@@ -210,12 +243,13 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             }
 
-            // 校验通过：创建项目（含起止时间、时间取自 app.now）并关闭弹窗
-            let project = if started_at.is_none() && finished_at.is_none() {
-                Project::new(name, app.now)
-            } else {
-                Project::new_full(name, started_at, finished_at, app.now)
-            };
+            // 校验通过：创建项目（含优先级与起止时间、时间取自 app.now）并关闭弹窗
+            let project =
+                if dialog.priority.is_none() && started_at.is_none() && finished_at.is_none() {
+                    Project::new(name, app.now)
+                } else {
+                    Project::new_full(name, dialog.priority, started_at, finished_at, app.now)
+                };
             app.projects.push(project);
             app.project_dialog = None;
             return persist(app);
@@ -239,6 +273,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.project_edit = Some(ProjectEdit {
                     project_id: id,
                     name: project.name.clone(),
+                    priority: project.priority,
                     start_input: project.started_at.map(format_due).unwrap_or_default(),
                     start_parsed: Ok(project.started_at),
                     end_input: project.finished_at.map(format_due).unwrap_or_default(),
@@ -268,6 +303,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // 实时解析：非法格式立即提示（end_parsed 缓存结果）
                 edit.end_parsed = parse_datetime(&text);
                 edit.end_input = text;
+            }
+        }
+
+        Message::ProjectEditPriorityChanged(priority) => {
+            if let Some(edit) = &mut app.project_edit {
+                edit.priority = priority;
             }
         }
 
@@ -311,8 +352,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
 
             if let Some(project) = app.projects.iter_mut().find(|p| p.id == edit.project_id) {
-                // 校验通过：就地更新名称与起止时间并退出编辑态
+                // 校验通过：就地更新名称、优先级与起止时间并退出编辑态
                 project.name = name;
+                project.priority = edit.priority;
                 project.started_at = started_at;
                 project.finished_at = finished_at;
                 return persist(app);
@@ -405,6 +447,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
 
+        Message::DialogPriorityChanged(priority) => {
+            if let Some(dialog) = &mut app.add_dialog {
+                dialog.priority = priority;
+            }
+        }
+
         Message::DialogDueChanged(text) => {
             if let Some(dialog) = &mut app.add_dialog {
                 // 实时解析：非法格式立即提示（due_parsed 缓存结果）
@@ -451,12 +499,22 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
             // 校验通过：创建任务（插最前、时间取自 app.now）并关闭弹窗
             let description = dialog.description.trim().to_owned();
-            let todo = if description.is_empty() && dialog.project_id.is_none() && due_at.is_none()
+            let todo = if description.is_empty()
+                && dialog.priority.is_none()
+                && dialog.project_id.is_none()
+                && due_at.is_none()
             {
                 // 纯标题场景
                 Todo::new(title, app.now)
             } else {
-                Todo::new_full(title, description, dialog.project_id, due_at, app.now)
+                Todo::new_full(
+                    title,
+                    description,
+                    dialog.priority,
+                    dialog.project_id,
+                    due_at,
+                    app.now,
+                )
             };
             app.todos.insert(0, todo);
             app.add_dialog = None;
@@ -470,6 +528,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     todo_id: id,
                     title: todo.title.clone(),
                     description: todo.description.clone(),
+                    priority: todo.priority,
                     project_id: todo.project_id,
                     due_input: todo.due_at.map(format_due).unwrap_or_default(),
                     due_parsed: Ok(todo.due_at),
@@ -501,6 +560,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
             if let Some(edit) = &mut app.todo_edit {
                 edit.project_id = project_id;
+            }
+        }
+
+        Message::EditPriorityChanged(priority) => {
+            if let Some(edit) = &mut app.todo_edit {
+                edit.priority = priority;
             }
         }
 
@@ -555,6 +620,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
             todo.title = title;
             todo.description = edit.description.trim().to_owned();
+            todo.priority = edit.priority;
             todo.project_id = edit.project_id;
             todo.due_at = due_at;
             return persist(app);
@@ -564,11 +630,13 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
     Task::none()
 }
 
-/// 把当前任务与项目序列化并异步写入磁盘（fire-and-forget）。
+/// 把当前任务、项目与排序偏好序列化并异步写入磁盘（fire-and-forget）。
 fn persist(app: &App) -> Task<Message> {
     let store = Store {
         todos: app.todos.clone(),
         projects: app.projects.clone(),
+        sort_mode: app.sort_mode,
+        project_sort_mode: app.project_sort_mode,
     };
     match serde_json::to_string_pretty(&store) {
         Ok(json) => Task::perform(storage::save(json), Message::Saved),
@@ -809,6 +877,10 @@ mod tests {
         let mut app = app_with(now);
         let _ = update(&mut app, Message::OpenProjectDialog);
         let _ = update(&mut app, Message::ProjectNameChanged("  工作  ".into()));
+        let _ = update(
+            &mut app,
+            Message::ProjectDialogPriorityChanged(Some(Priority::High)),
+        );
         let _ = update(&mut app, Message::ProjectStartChanged("2026-01-01".into()));
         let _ = update(
             &mut app,
@@ -821,6 +893,7 @@ mod tests {
         assert_eq!(app.projects.len(), 1);
         let project = &app.projects[0];
         assert_eq!(project.name, "工作"); // trim 后存储
+        assert_eq!(project.priority, Some(Priority::High));
         assert!(project.started_at.is_some());
         assert!(project.finished_at.is_some());
         assert_eq!(project.created_at, now); // 时间取自 app.now
@@ -912,6 +985,7 @@ mod tests {
         let now = Utc::now();
         let mut app = app_with(now);
         let id = add_project(&mut app, "工作");
+        app.projects[0].priority = Some(Priority::High);
         app.projects[0].started_at = Some(now);
         app.projects[0].finished_at = Some(now + chrono::Duration::days(30));
 
@@ -920,6 +994,7 @@ mod tests {
         let edit = app.project_edit.as_ref().unwrap();
         assert_eq!(edit.project_id, id);
         assert_eq!(edit.name, "工作");
+        assert_eq!(edit.priority, Some(Priority::High));
         assert!(!edit.start_input.is_empty()); // 起止时间回填为可解析文本
         assert!(!edit.end_input.is_empty());
         assert!(edit.start_parsed.is_ok());
@@ -964,6 +1039,10 @@ mod tests {
         let _ = update(&mut app, Message::ProjectEditNameChanged("  个人  ".into()));
         let _ = update(
             &mut app,
+            Message::ProjectEditPriorityChanged(Some(Priority::Medium)),
+        );
+        let _ = update(
+            &mut app,
             Message::ProjectEditStartChanged("2026-01-01".into()),
         );
         let _ = update(
@@ -976,6 +1055,7 @@ mod tests {
         assert!(app.project_edit.is_none()); // 退出编辑态
         let project = &app.projects[0];
         assert_eq!(project.name, "个人"); // trim 后提交
+        assert_eq!(project.priority, Some(Priority::Medium));
         assert!(project.started_at.is_some());
         assert!(project.finished_at.is_some());
         assert_eq!(project.created_at, now); // 创建时间不受影响
@@ -1117,12 +1197,29 @@ mod tests {
         let store = Store {
             todos: vec![Todo::new("任务".into(), Utc::now())],
             projects: vec![Project::new("工作".into(), Utc::now())],
+            sort_mode: SortMode::Priority,
+            project_sort_mode: SortMode::Due,
         };
 
         let _ = update(&mut app, Message::Loaded(Ok(store)));
 
         assert_eq!(app.todos.len(), 1);
         assert_eq!(app.projects.len(), 1);
+        assert_eq!(app.sort_mode, SortMode::Priority); // 排序偏好随加载恢复
+        assert_eq!(app.project_sort_mode, SortMode::Due);
+    }
+
+    #[test]
+    fn sort_mode_changed_switches_and_persists() {
+        let mut app = App::default();
+        assert_eq!(app.sort_mode, SortMode::default()); // 默认综合
+
+        let _ = update(&mut app, Message::SortModeChanged(SortMode::Priority));
+        assert_eq!(app.sort_mode, SortMode::Priority);
+
+        let _ = update(&mut app, Message::ProjectSortModeChanged(SortMode::Due));
+        assert_eq!(app.project_sort_mode, SortMode::Due);
+        assert_eq!(app.sort_mode, SortMode::Priority); // 互不影响
     }
 
     #[test]
@@ -1241,6 +1338,10 @@ mod tests {
             &mut app,
             Message::DialogDescriptionChanged("  先读需求  ".into()),
         );
+        let _ = update(
+            &mut app,
+            Message::DialogPriorityChanged(Some(Priority::High)),
+        );
         let _ = update(&mut app, Message::DialogProjectChanged(Some(pid)));
         let _ = update(
             &mut app,
@@ -1254,6 +1355,7 @@ mod tests {
         let todo = &app.todos[0];
         assert_eq!(todo.title, "写方案"); // trim 后存储
         assert_eq!(todo.description, "先读需求"); // trim 后存储
+        assert_eq!(todo.priority, Some(Priority::High));
         assert_eq!(todo.project_id, Some(pid));
         assert!(todo.due_at.is_some());
         assert_eq!(todo.created_at, now); // 时间取自 app.now
@@ -1315,6 +1417,7 @@ mod tests {
         let pid = add_project(&mut app, "工作");
         let todo_id = add_todo(&mut app, "写方案");
         app.todos[0].description = "先读需求".into();
+        app.todos[0].priority = Some(Priority::Medium);
         app.todos[0].project_id = Some(pid);
         app.todos[0].due_at = Some(now);
 
@@ -1324,6 +1427,7 @@ mod tests {
         assert_eq!(edit.todo_id, todo_id);
         assert_eq!(edit.title, "写方案");
         assert_eq!(edit.description, "先读需求");
+        assert_eq!(edit.priority, Some(Priority::Medium));
         assert_eq!(edit.project_id, Some(pid));
         assert!(!edit.due_input.is_empty()); // 截止时间回填为可解析文本
         assert!(edit.due_parsed.is_ok());
@@ -1425,6 +1529,7 @@ mod tests {
             &mut app,
             Message::EditDescriptionChanged("  整理数据  ".into()),
         );
+        let _ = update(&mut app, Message::EditPriorityChanged(Some(Priority::Low)));
         let _ = update(&mut app, Message::EditProjectChanged(Some(pid)));
         let _ = update(&mut app, Message::EditDueChanged("2026-01-31 18:30".into()));
 
@@ -1434,6 +1539,7 @@ mod tests {
         let todo = &app.todos[0];
         assert_eq!(todo.title, "写周报"); // trim 后提交
         assert_eq!(todo.description, "整理数据");
+        assert_eq!(todo.priority, Some(Priority::Low));
         assert_eq!(todo.project_id, Some(pid));
         assert!(todo.due_at.is_some());
         assert_eq!(todo.created_at, now); // 时间字段不受影响

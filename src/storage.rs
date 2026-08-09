@@ -10,13 +10,19 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Project, Todo};
+use crate::model::{Project, SortMode, Todo};
 
-/// 持久化数据：任务列表 + 项目列表，单文件存储。
+/// 持久化数据：任务列表 + 项目列表 + 排序偏好，单文件存储。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Store {
     pub todos: Vec<Todo>,
     pub projects: Vec<Project>,
+    /// 任务排序方式（持久化偏好；旧文件缺省 → 综合）
+    #[serde(default)]
+    pub sort_mode: SortMode,
+    /// 项目排序方式（持久化偏好；旧文件缺省 → 综合）
+    #[serde(default)]
+    pub project_sort_mode: SortMode,
 }
 
 /// 数据文件路径（若无法确定系统目录，退化为当前目录下的 todos.json）。
@@ -55,7 +61,7 @@ fn parse(contents: &str) -> Result<Store, String> {
         Err(_) => serde_json::from_str::<Vec<Todo>>(contents)
             .map(|todos| Store {
                 todos,
-                projects: Vec::new(),
+                ..Default::default()
             })
             .map_err(|error| error.to_string()),
     }
@@ -76,6 +82,7 @@ pub async fn save_to(path: PathBuf, json: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Priority;
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -89,6 +96,7 @@ mod tests {
                 id: Uuid::now_v7(),
                 title: "读书".into(),
                 description: "睡前读两章".into(),
+                priority: None,
                 project_id: None,
                 due_at: Some(chrono::Utc::now() + chrono::Duration::days(1)),
                 created_at: Utc::now(),
@@ -99,6 +107,7 @@ mod tests {
                 id: Uuid::now_v7(),
                 title: "跑步".into(),
                 description: String::new(),
+                priority: None,
                 project_id: None,
                 due_at: None,
                 created_at: Utc::now(),
@@ -113,6 +122,7 @@ mod tests {
         let path = temp_path("roundtrip.json");
         let project = Project::new_full(
             "工作".into(),
+            Some(Priority::High),
             Some(Utc::now()),
             Some(Utc::now() + chrono::Duration::days(30)),
             Utc::now(),
@@ -122,6 +132,8 @@ mod tests {
         let store = Store {
             todos,
             projects: vec![project],
+            sort_mode: SortMode::Priority,
+            project_sort_mode: SortMode::Combined,
         };
 
         save_to(path.clone(), serde_json::to_string_pretty(&store).unwrap())
@@ -148,6 +160,27 @@ mod tests {
             loaded.projects[0].finished_at,
             store.projects[0].finished_at
         );
+        assert_eq!(loaded.projects[0].priority, store.projects[0].priority); // 优先级往返保留
+        assert_eq!(loaded.sort_mode, SortMode::Priority); // 排序偏好往返保留
+        assert_eq!(loaded.project_sort_mode, SortMode::Combined);
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_store_without_sort_modes_loads() {
+        // 旧版 Store：无 sort_mode / project_sort_mode 字段，自动取默认「综合」
+        let path = temp_path("legacy-sort.json");
+        let json = r#"{
+            "todos": [],
+            "projects": []
+        }"#;
+        save_to(path.clone(), json.into()).await.unwrap();
+
+        let loaded = load_from(path.clone()).await.unwrap();
+
+        assert_eq!(loaded.sort_mode, SortMode::default()); // Combined
+        assert_eq!(loaded.project_sort_mode, SortMode::default());
 
         let _ = tokio::fs::remove_file(&path).await;
     }

@@ -90,6 +90,7 @@ mod tests {
                 title: "读书".into(),
                 description: "睡前读两章".into(),
                 project_id: None,
+                due_at: Some(chrono::Utc::now() + chrono::Duration::days(1)),
                 created_at: Utc::now(),
                 started_at: None,
                 finished_at: None,
@@ -99,6 +100,7 @@ mod tests {
                 title: "跑步".into(),
                 description: String::new(),
                 project_id: None,
+                due_at: None,
                 created_at: Utc::now(),
                 started_at: Some(Utc::now()),
                 finished_at: Some(Utc::now()),
@@ -128,7 +130,9 @@ mod tests {
         assert_eq!(loaded.todos[0].id, store.todos[0].id);
         assert_eq!(loaded.todos[0].created_at, store.todos[0].created_at);
         assert_eq!(loaded.todos[0].project_id, Some(store.projects[0].id));
+        assert_eq!(loaded.todos[0].due_at, store.todos[0].due_at); // 截止时间往返保留
         assert_eq!(loaded.todos[1].title, "跑步");
+        assert_eq!(loaded.todos[1].due_at, None); // 无截止时间往返保持 None
         assert!(loaded.todos[1].started_at.is_some());
         assert!(loaded.todos[1].finished_at.is_some());
         assert_eq!(loaded.projects.len(), 1);
@@ -159,6 +163,7 @@ mod tests {
         assert_eq!(loaded.todos[0].title, "旧任务");
         assert_eq!(loaded.todos[0].description, ""); // 缺省字段安全落空
         assert_eq!(loaded.todos[0].project_id, None); // 缺省字段安全落空
+        assert_eq!(loaded.todos[0].due_at, None); // 缺省字段安全落空
         assert!(loaded.projects.is_empty()); // 迁移后无项目
 
         let _ = tokio::fs::remove_file(&path).await;

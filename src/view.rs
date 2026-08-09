@@ -6,11 +6,14 @@
 
 use chrono::{DateTime, Duration, Utc};
 use iced::font::Weight;
-use iced::widget::{PickList, Space, button, column, container, row, scrollable, text, text_input};
+use iced::widget::{
+    PickList, Space, button, column, container, mouse_area, opaque, row, scrollable, stack, text,
+    text_input,
+};
 use iced::{Alignment, Background, Border, Color, Element, Font, Length};
 use uuid::Uuid;
 
-use crate::model::{App, Project, Todo, TodoStatus};
+use crate::model::{App, Project, QuickDue, Todo, TodoStatus};
 use crate::update::Message;
 
 /// 次要文本（标签、提示）颜色：中性灰
@@ -24,12 +27,19 @@ const DONE: Color = Color::from_rgb(0.36, 0.78, 0.50);
 /// 侧边栏固定宽度
 const SIDEBAR_WIDTH: f32 = 220.0;
 
+/// 弹窗标题输入框的 widget Id（打开弹窗时聚焦用）
+pub(crate) const DIALOG_TITLE_ID: iced::widget::Id = iced::widget::Id::new("add-dialog-title");
+
+/// 弹窗截止时间的快捷选项（选中后回填到文本输入框，仍可手动修改）
+const QUICK_DUE_OPTIONS: [QuickDue; 3] = [QuickDue::Today, QuickDue::Tomorrow, QuickDue::Sunday];
+
 const BOLD: Font = Font {
     weight: Weight::Bold,
     ..Font::DEFAULT
 };
 
 /// 应用主视图：左侧项目侧边栏（可收放）+ 右侧任务主区域。
+/// 弹窗添加任务打开时，在内容之上叠加模态遮罩与弹窗卡片。
 pub fn view(app: &App) -> Element<'_, Message> {
     // 标题栏：侧边栏收起时，左侧显示「展开」按钮
     let header = if app.sidebar_visible {
@@ -63,6 +73,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
             button(text("添加").size(15))
                 .on_press(Message::AddTodo)
                 .padding([10, 22]),
+            Space::new().width(6),
+            button(text("详细添加…").size(13))
+                .on_press(Message::OpenAddDialog)
+                .style(button::secondary)
+                .padding([10, 12]),
         ]
         .align_y(Alignment::Center),
         text_input("任务描述（可选），回车同样可添加", &app.description_input)
@@ -104,11 +119,157 @@ pub fn view(app: &App) -> Element<'_, Message> {
         body.into()
     };
 
-    container(content)
+    let base = container(content)
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(24)
-        .center_x(Length::Fill)
+        .center_x(Length::Fill);
+
+    // 弹窗打开时：内容之上叠加 遮罩（点击关闭）+ 弹窗卡片（不透明，防穿透）
+    if app.add_dialog.is_some() {
+        stack![
+            base,
+            mouse_area(
+                container(Space::new())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(scrim_style),
+            )
+            .on_press(Message::CloseAddDialog),
+            container(opaque(add_dialog_card(app)))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    } else {
+        base.into()
+    }
+}
+
+/// 模态遮罩样式：半透明黑（弹窗打开时压暗背景）。
+fn scrim_style(_theme: &iced::Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
+        ..Default::default()
+    }
+}
+
+// ---------- 弹窗添加任务 ----------
+
+/// 弹窗卡片：标题 / 描述 / 所属项目 / 截止时间（输入 + 快捷下拉）+ 操作按钮。
+fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
+    let dialog = app.add_dialog.as_ref().expect("弹窗卡片仅在弹窗打开时渲染");
+
+    // 标题（必填）：回车提交
+    let title_input = text_input("任务标题（必填）", &dialog.title)
+        .id(DIALOG_TITLE_ID)
+        .on_input(Message::DialogTitleChanged)
+        .on_submit(Message::SubmitAddDialog)
+        .padding(10);
+
+    // 描述（可选）：回车提交
+    let description_input = text_input("任务描述（可选）", &dialog.description)
+        .on_input(Message::DialogDescriptionChanged)
+        .on_submit(Message::SubmitAddDialog)
+        .padding(10);
+
+    // 所属项目：复用卡片上的选项包装（"无项目" + 全部项目）
+    let options: Vec<ProjectChoice> = std::iter::once(ProjectChoice::none())
+        .chain(app.projects.iter().map(ProjectChoice::of))
+        .collect();
+    let selected = dialog
+        .project_id
+        .and_then(|id| app.projects.iter().find(|p| p.id == id))
+        .map(ProjectChoice::of)
+        .unwrap_or_else(ProjectChoice::none);
+    let project_picker = row![
+        text("所属项目")
+            .size(13)
+            .color(MUTED)
+            .width(Length::Fixed(72.0)),
+        PickList::new(options, Some(selected), move |choice| {
+            Message::DialogProjectChanged(choice.id)
+        },)
+        .placeholder("无项目")
+        .text_size(13)
+        .padding([4, 8])
+        .width(Length::Fill),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    // 截止时间：文本输入（实时校验）+ 快捷下拉（回填后仍可手动修改）
+    let due_row = row![
+        text("截止时间")
+            .size(13)
+            .color(MUTED)
+            .width(Length::Fixed(72.0)),
+        text_input("2026-01-31 或 2026-01-31 18:30", &dialog.due_input)
+            .on_input(Message::DialogDueChanged)
+            .on_submit(Message::SubmitAddDialog)
+            .padding(10)
+            .width(Length::Fill),
+        Space::new().width(6),
+        PickList::new(
+            &QUICK_DUE_OPTIONS[..],
+            Option::<QuickDue>::None,
+            Message::DialogQuickDue
+        )
+        .placeholder("快捷时间")
+        .text_size(13)
+        .padding([4, 8]),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    // 表单主体；截止时间格式错误时追加红字提示
+    let mut form = column![
+        text("添加任务").size(20).font(BOLD),
+        Space::new().height(4),
+        form_field("标题", title_input),
+        form_field("描述", description_input),
+        project_picker,
+        due_row,
+    ]
+    .spacing(10);
+
+    if let Err(hint) = &dialog.due_parsed {
+        form = form.push(text(hint.as_str()).size(12).color(ERROR_COLOR));
+    }
+
+    // 按钮行：标题为空或截止时间非法时"创建"禁用
+    let can_submit = !dialog.title.trim().is_empty() && dialog.due_parsed.is_ok();
+    let actions = row![
+        Space::new().width(Length::Fill),
+        button(text("取消").size(14))
+            .on_press(Message::CloseAddDialog)
+            .padding([8, 18]),
+        Space::new().width(8),
+        button(text("创建").size(14))
+            .on_press_maybe(can_submit.then_some(Message::SubmitAddDialog))
+            .style(button::primary)
+            .padding([8, 18]),
+    ]
+    .align_y(Alignment::Center);
+
+    container(
+        column![form, Space::new().height(2), actions]
+            .spacing(10)
+            .width(Length::Fixed(460.0)),
+    )
+    .padding(20)
+    .style(card_style)
+    .into()
+}
+
+/// 弹窗表单里带小标签的一行（标签在上、输入框在下）。
+fn form_field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    column![text(label).size(13).color(MUTED), input.into()]
+        .spacing(4)
         .into()
 }
 
@@ -479,20 +640,27 @@ impl std::fmt::Display for ProjectChoice {
     }
 }
 
-/// 时间元信息：项目归属 + 创建 / 开始 / 结束；进行中附实时耗时，已完成附总耗时。
+impl std::fmt::Display for QuickDue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// 时间元信息：项目归属 + 截止时间 + 创建 / 开始 / 结束；进行中附实时耗时，已完成附总耗时。
 fn meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
-    let mut meta = column![
-        project_picker_row(todo, app),
-        time_row("创建时间", format_time(todo.created_at), MUTED),
-        time_row(
-            "开始时间",
-            todo.started_at
-                .map(format_time)
-                .unwrap_or_else(|| "—".into()),
-            MUTED,
-        ),
-    ]
-    .spacing(3);
+    let mut meta = column![project_picker_row(todo, app)].spacing(3);
+
+    // 截止时间：已逾期且未完成的任务标红提示
+    if let Some(due) = todo.due_at {
+        let overdue = todo.status() != TodoStatus::Done && due < app.now;
+        meta = meta.push(time_row(
+            "截止时间",
+            format_time(due),
+            if overdue { ERROR_COLOR } else { MUTED },
+        ));
+    }
+
+    meta = meta.push(time_row("创建时间", format_time(todo.created_at), MUTED));
 
     if todo.status() == TodoStatus::InProgress {
         let elapsed = todo

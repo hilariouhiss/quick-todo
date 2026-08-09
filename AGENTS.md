@@ -66,8 +66,8 @@ docs/
 4. **持久化 fire-and-forget**：每次状态变更后把整个 `Store`（todos + projects）`serde_json::to_string_pretty` 序列化，经 `Task::perform(storage::save, Message::Saved)` 异步写盘；`Saved` 成功消息静默，失败写入 `app.error`。不引入增量同步。
 5. **数据向后兼容**：`Todo.project_id` 与 `Todo.description` 带 `#[serde(default)]`；`storage::load` 对旧版纯数组格式自动迁移为 `Store`，不得破坏旧数据。
 6. **项目语义**：项目名 trim 后非空且不重名；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
-7. **新任务插在最前**（`todos.insert(0, ...)`）；标题与描述输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）。
-8. **侧边栏收放是纯 UI 状态**（`App.sidebar_visible`）：只存内存、**不参与持久化**，启动默认收起；`ToggleSidebar` 不触发落盘。
+7. **新任务插在最前**（`todos.insert(0, ...)`）；标题与描述输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）；弹窗添加（`SubmitAddDialog`）同样插最前、时间取自 `app.now`，校验不过（空白标题 / 截止时间格式非法 / 项目不存在）时弹窗保持打开、输入保留。
+8. **侧边栏收放与弹窗表单是纯 UI 状态**（`App.sidebar_visible` / `App.add_dialog`）：只存内存、**不参与持久化**，启动默认收起 / 关闭；`ToggleSidebar`、弹窗的打开/关闭/各输入变化均不触发落盘（`SubmitAddDialog` 创建成功才落盘）。
 9. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。
 10. **错误不崩溃**：数据文件缺失视为空数据；损坏 JSON 返回错误并显示在 UI（`app.error`），绝不 panic。
 11. **UI 文案与代码注释使用中文**；模块级 `//!` + 公开项 `///` 文档注释是标配。

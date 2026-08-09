@@ -8,8 +8,9 @@ use chrono::{DateTime, Utc};
 use iced::Task;
 use uuid::Uuid;
 
-use crate::model::{App, Project, Todo, TodoStatus};
+use crate::model::{AddDialog, App, Project, QuickDue, Todo, TodoStatus, parse_due};
 use crate::storage::{self, Store};
+use crate::view::DIALOG_TITLE_ID;
 
 /// 应用内所有可触发的消息。
 #[derive(Debug, Clone)]
@@ -55,6 +56,22 @@ pub enum Message {
     },
     /// 收起 / 展开项目侧边栏（纯 UI 状态，不触发落盘）
     ToggleSidebar,
+    /// 打开弹窗添加任务（预选当前筛选的项目）
+    OpenAddDialog,
+    /// 关闭弹窗添加任务（丢弃已填内容，不落盘）
+    CloseAddDialog,
+    /// 弹窗：标题输入框变化
+    DialogTitleChanged(String),
+    /// 弹窗：描述输入框变化
+    DialogDescriptionChanged(String),
+    /// 弹窗：项目下拉选择
+    DialogProjectChanged(Option<Uuid>),
+    /// 弹窗：截止时间输入框变化（实时解析校验）
+    DialogDueChanged(String),
+    /// 弹窗：快捷时间下拉选择（回填到截止时间输入框）
+    DialogQuickDue(QuickDue),
+    /// 弹窗：点击"创建"/回车提交（校验通过后创建任务并落盘）
+    SubmitAddDialog,
 }
 
 /// 处理消息，更新应用状态；必要时返回副作用任务（异步落盘）。
@@ -182,6 +199,97 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::SelectProject(selection) => app.selected_project = selection,
 
         Message::ToggleSidebar => app.sidebar_visible = !app.sidebar_visible,
+
+        Message::OpenAddDialog => {
+            // 弹窗打开：处于项目筛选时预选该项目，作为默认归属
+            app.add_dialog = Some(AddDialog {
+                project_id: app.selected_project,
+                ..AddDialog::default()
+            });
+            // 聚焦弹窗标题输入框（下一次渲染生效）
+            return iced::widget::operation::focus(DIALOG_TITLE_ID);
+        }
+
+        Message::CloseAddDialog => {
+            // 关闭弹窗：丢弃已填内容（弹窗表单是纯内存状态，不落盘）
+            app.add_dialog = None;
+        }
+
+        Message::DialogTitleChanged(text) => {
+            if let Some(dialog) = &mut app.add_dialog {
+                dialog.title = text;
+            }
+        }
+
+        Message::DialogDescriptionChanged(text) => {
+            if let Some(dialog) = &mut app.add_dialog {
+                dialog.description = text;
+            }
+        }
+
+        Message::DialogProjectChanged(project_id) => {
+            // 防御：项目必须存在（已被删除的项目不可再被选中）
+            if !project_id.is_none_or(|id| app.projects.iter().any(|p| p.id == id)) {
+                return Task::none();
+            }
+            if let Some(dialog) = &mut app.add_dialog {
+                dialog.project_id = project_id;
+            }
+        }
+
+        Message::DialogDueChanged(text) => {
+            if let Some(dialog) = &mut app.add_dialog {
+                // 实时解析：非法格式立即提示（due_parsed 缓存结果）
+                dialog.due_parsed = parse_due(&text);
+                dialog.due_input = text;
+            }
+        }
+
+        Message::DialogQuickDue(quick) => {
+            if let Some(dialog) = &mut app.add_dialog {
+                // 快捷时间：基于 app.now 的本地时区计算，回填文本后走统一解析
+                let text = quick.due_text(app.now);
+                dialog.due_parsed = parse_due(&text);
+                dialog.due_input = text;
+            }
+        }
+
+        Message::SubmitAddDialog => {
+            // 校验不通过时恢复弹窗（保留用户输入），不产生任何副作用
+            let Some(dialog) = app.add_dialog.take() else {
+                return Task::none();
+            };
+            let restore = |app: &mut App| app.add_dialog = Some(dialog.clone());
+
+            let title = dialog.title.trim().to_owned();
+            if title.is_empty() {
+                restore(app);
+                return Task::none();
+            }
+            let due_at = match dialog.due_parsed {
+                Ok(due) => due,
+                Err(_) => {
+                    restore(app);
+                    return Task::none();
+                }
+            };
+            if !dialog
+                .project_id
+                .is_none_or(|id| app.projects.iter().any(|p| p.id == id))
+            {
+                restore(app);
+                return Task::none();
+            }
+
+            // 校验通过：创建任务（插最前、时间取自 app.now）并关闭弹窗
+            let description = dialog.description.trim().to_owned();
+            app.todos.insert(
+                0,
+                Todo::new_full(title, description, dialog.project_id, due_at, app.now),
+            );
+            app.add_dialog = None;
+            return persist(app);
+        }
 
         Message::AssignProject {
             todo_id,
@@ -560,5 +668,179 @@ mod tests {
         let mut app = App::default();
         let _ = update(&mut app, Message::Loaded(Err("磁盘错误".into())));
         assert!(app.error.is_some());
+    }
+
+    // ---------- 弹窗添加任务 ----------
+
+    #[test]
+    fn open_dialog_prefills_selected_project() {
+        let mut app = App::default();
+        let pid = add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::SelectProject(Some(pid)));
+
+        let _ = update(&mut app, Message::OpenAddDialog);
+
+        let dialog = app.add_dialog.as_ref().unwrap();
+        assert_eq!(dialog.project_id, Some(pid)); // 预选当前筛选的项目
+        assert!(dialog.title.is_empty());
+        assert_eq!(dialog.due_parsed, Ok(None)); // 截止时间默认留空
+    }
+
+    #[test]
+    fn open_dialog_without_selection_has_no_project() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        assert_eq!(app.add_dialog.as_ref().unwrap().project_id, None);
+    }
+
+    #[test]
+    fn close_dialog_discards_input() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("写方案".into()));
+
+        let _ = update(&mut app, Message::CloseAddDialog);
+
+        assert!(app.add_dialog.is_none());
+        assert!(app.todos.is_empty()); // 未创建任何任务
+    }
+
+    #[test]
+    fn dialog_inputs_update_form() {
+        let mut app = App::default();
+        let pid = add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::OpenAddDialog);
+
+        let _ = update(&mut app, Message::DialogTitleChanged("写方案".into()));
+        let _ = update(
+            &mut app,
+            Message::DialogDescriptionChanged("先读需求".into()),
+        );
+        let _ = update(&mut app, Message::DialogProjectChanged(Some(pid)));
+        let _ = update(
+            &mut app,
+            Message::DialogDueChanged("2026-01-31 18:30".into()),
+        );
+
+        let dialog = app.add_dialog.as_ref().unwrap();
+        assert_eq!(dialog.title, "写方案");
+        assert_eq!(dialog.description, "先读需求");
+        assert_eq!(dialog.project_id, Some(pid));
+        assert!(dialog.due_parsed.as_ref().unwrap().is_some());
+    }
+
+    #[test]
+    fn dialog_inputs_ignored_when_closed() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::DialogTitleChanged("写方案".into()));
+        let _ = update(&mut app, Message::DialogDueChanged("2026-01-31".into()));
+        assert!(app.add_dialog.is_none());
+    }
+
+    #[test]
+    fn dialog_unknown_project_is_rejected() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(
+            &mut app,
+            Message::DialogProjectChanged(Some(Uuid::now_v7())),
+        );
+        assert_eq!(app.add_dialog.as_ref().unwrap().project_id, None);
+    }
+
+    #[test]
+    fn dialog_due_invalid_shows_error() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogDueChanged("后天".into()));
+        assert!(app.add_dialog.as_ref().unwrap().due_parsed.is_err());
+    }
+
+    #[test]
+    fn dialog_quick_due_fills_and_parses() {
+        let mut app = app_with(Utc::now());
+        let _ = update(&mut app, Message::OpenAddDialog);
+
+        let _ = update(&mut app, Message::DialogQuickDue(QuickDue::Tomorrow));
+
+        let dialog = app.add_dialog.as_ref().unwrap();
+        assert!(dialog.due_input.contains("23:59")); // 回填文本
+        assert!(dialog.due_parsed.as_ref().unwrap().is_some()); // 可解析
+    }
+
+    #[test]
+    fn submit_dialog_creates_full_todo() {
+        let now = Utc::now();
+        let mut app = app_with(now);
+        let pid = add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("  写方案  ".into()));
+        let _ = update(
+            &mut app,
+            Message::DialogDescriptionChanged("  先读需求  ".into()),
+        );
+        let _ = update(&mut app, Message::DialogProjectChanged(Some(pid)));
+        let _ = update(
+            &mut app,
+            Message::DialogDueChanged("2026-01-31 18:30".into()),
+        );
+
+        let _ = update(&mut app, Message::SubmitAddDialog);
+
+        assert!(app.add_dialog.is_none()); // 弹窗关闭
+        assert_eq!(app.todos.len(), 1);
+        let todo = &app.todos[0];
+        assert_eq!(todo.title, "写方案"); // trim 后存储
+        assert_eq!(todo.description, "先读需求"); // trim 后存储
+        assert_eq!(todo.project_id, Some(pid));
+        assert!(todo.due_at.is_some());
+        assert_eq!(todo.created_at, now); // 时间取自 app.now
+        assert_eq!(todo.status(), TodoStatus::Pending);
+    }
+
+    #[test]
+    fn submit_dialog_without_due_creates_todo() {
+        let now = Utc::now();
+        let mut app = app_with(now);
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("无截止时间".into()));
+
+        let _ = update(&mut app, Message::SubmitAddDialog);
+
+        assert!(app.add_dialog.is_none());
+        assert_eq!(app.todos[0].due_at, None);
+    }
+
+    #[test]
+    fn submit_dialog_blank_title_keeps_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("   ".into()));
+
+        let _ = update(&mut app, Message::SubmitAddDialog);
+
+        assert!(app.add_dialog.is_some()); // 弹窗保持打开
+        assert_eq!(app.add_dialog.as_ref().unwrap().title, "   "); // 输入保留
+        assert!(app.todos.is_empty());
+    }
+
+    #[test]
+    fn submit_dialog_invalid_due_keeps_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("写方案".into()));
+        let _ = update(&mut app, Message::DialogDueChanged("后天".into()));
+
+        let _ = update(&mut app, Message::SubmitAddDialog);
+
+        assert!(app.add_dialog.is_some());
+        assert!(app.todos.is_empty());
+    }
+
+    #[test]
+    fn submit_without_open_dialog_is_noop() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::SubmitAddDialog);
+        assert!(app.todos.is_empty());
     }
 }

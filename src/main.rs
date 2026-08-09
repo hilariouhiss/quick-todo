@@ -37,9 +37,10 @@ fn boot() -> (App, Task<Message>) {
     )
 }
 
-/// 每秒产生一个时钟消息，驱动"进行中"任务的实时耗时显示。
-fn subscription(_app: &App) -> Subscription<Message> {
-    Subscription::run(|| {
+/// 每秒产生一个时钟消息，驱动"进行中"任务的实时耗时显示；
+/// 弹窗添加任务打开时，额外监听 Esc 键关闭弹窗。
+fn subscription(app: &App) -> Subscription<Message> {
+    let clock = Subscription::run(|| {
         iced::stream::channel(
             1,
             |mut sender: mpsc::Sender<chrono::DateTime<chrono::Utc>>| async move {
@@ -54,5 +55,21 @@ fn subscription(_app: &App) -> Subscription<Message> {
             },
         )
     })
-    .map(Message::Tick)
+    .map(Message::Tick);
+
+    if app.add_dialog.is_some() {
+        // 弹窗打开时：Esc 关闭弹窗（与点击遮罩 / 取消按钮等效）
+        let esc = iced::event::listen_with(|event, _status, _window| {
+            if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event
+                && key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+            {
+                Some(Message::CloseAddDialog)
+            } else {
+                None
+            }
+        });
+        Subscription::batch([clock, esc])
+    } else {
+        clock
+    }
 }

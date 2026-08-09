@@ -102,6 +102,6 @@ docs/
 
 1. **先读文档**：涉及行为/数据模型改动时，先读 `docs/方案.md`，设计与文档冲突时先更新文档再改代码；新功能先编写计划文档到 `.pi/plan/` 再实现。
 2. **善用代码索引**：本仓库已配置 CodeGraph（`codegraph_search` / `codegraph_explore` / `codegraph_callers` 等），查符号与调用关系优先用它们，其次才 grep/read。
-3. **小步提交**：仓库当前尚无 commit（git 未初始化历史），功能完成即可做首次提交；提交信息用中文或英文均可，使用 Conventional Commits 风格。
-4. **变更闭环**：改代码 → 补测试 → `cargo test` → `cargo clippy` → `cargo run` 手动验证 UI 行为。
+3. **小步提交（提交门禁）**：功能完成后**必须**依次通过 `cargo fmt`（无差异）、`cargo clippy --all-targets`（零警告）、`cargo test`（全绿）**才能提交**；未通过门禁不得 commit，也不得用 `--no-verify` 绕过。提交信息用中文或英文均可，使用 Conventional Commits 风格。
+4. **变更闭环**：改代码 → 补测试 → `cargo fmt` → `cargo test` → `cargo clippy --all-targets` → `cargo run` 手动验证 UI 行为。
 5. **验收对照**：功能完成时对照 `docs/方案.md` 第 8 节验收标准逐条核对。

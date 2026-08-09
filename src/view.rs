@@ -34,6 +34,10 @@ pub(crate) const DIALOG_TITLE_ID: iced::widget::Id = iced::widget::Id::new("add-
 pub(crate) const PROJECT_DIALOG_NAME_ID: iced::widget::Id =
     iced::widget::Id::new("add-project-dialog-name");
 
+/// 项目内联编辑名称输入框的 widget Id（进入编辑态时聚焦用）
+pub(crate) const PROJECT_EDIT_NAME_ID: iced::widget::Id =
+    iced::widget::Id::new("edit-project-name");
+
 /// 弹窗截止时间的快捷选项（选中后回填到文本输入框，仍可手动修改）
 const QUICK_DUE_OPTIONS: [QuickDue; 3] = [QuickDue::Today, QuickDue::Tomorrow, QuickDue::Sunday];
 
@@ -42,15 +46,23 @@ const BOLD: Font = Font {
     ..Font::DEFAULT
 };
 
-/// 应用主视图：左侧项目侧边栏（可收放）+ 右侧任务主区域。
-/// 弹窗添加任务打开时，在内容之上叠加模态遮罩与弹窗卡片。
+/// 应用主视图：左侧项目侧边栏（可收放）+ 右侧任务主区域（双列分组）。
+/// 任一弹窗（任务添加 / 项目添加编辑 / 已完成归档）打开时，叠加模态遮罩与弹窗卡片。
 pub fn view(app: &App) -> Element<'_, Message> {
-    // 标题栏：侧边栏收起时，左侧显示「展开」按钮
+    // 标题栏：侧边栏收起时，左侧显示「展开」按钮；右端为唯一添加入口
+    let add_button = |message: &Message| {
+        button(text("＋ 添加任务").size(13))
+            .on_press(message.clone())
+            .style(button::primary)
+            .padding([6, 12])
+    };
     let header = if app.sidebar_visible {
         row![
             text("待办清单").size(26).font(BOLD),
             Space::new().width(Length::Fill),
             text(summary(app)).size(13).color(MUTED),
+            Space::new().width(10),
+            add_button(&Message::OpenAddDialog),
         ]
     } else {
         row![
@@ -61,53 +73,25 @@ pub fn view(app: &App) -> Element<'_, Message> {
             text("待办清单").size(26).font(BOLD),
             Space::new().width(Length::Fill),
             text(summary(app)).size(13).color(MUTED),
+            Space::new().width(10),
+            add_button(&Message::OpenAddDialog),
         ]
     }
     .align_y(Alignment::Center);
 
-    // 输入区：标题输入行（回车或点击"添加"即可创建；描述经「详细添加…」弹窗填写）
-    let input_column = row![
-        text_input("输入任务内容，回车或点击“添加”", &app.input)
-            .on_input(Message::InputChanged)
-            .on_submit(Message::AddTodo)
-            .padding(10)
-            .width(Length::Fill),
-        Space::new().width(8),
-        button(text("添加").size(15))
-            .on_press(Message::AddTodo)
-            .padding([10, 22]),
-        Space::new().width(6),
-        button(text("详细添加…").size(13))
-            .on_press(Message::OpenAddDialog)
-            .style(button::secondary)
-            .padding([10, 12]),
-    ]
-    .align_y(Alignment::Center);
-
-    let mut body = column![header, input_column]
-        .spacing(12)
-        .height(Length::Fill);
+    let mut body = column![header].spacing(12).height(Length::Fill);
 
     if let Some(error) = &app.error {
         body = body.push(text(error.as_str()).size(12).color(ERROR_COLOR));
     }
 
-    // 按当前筛选的项目过滤任务列表
+    // 按当前筛选的项目过滤任务列表，再按状态分列（已完成归档到弹窗）
     let visible: Vec<&Todo> = app
         .todos
         .iter()
         .filter(|todo| app.selected_project.is_none() || todo.project_id == app.selected_project)
         .collect();
-
-    body = body.push(if visible.is_empty() {
-        empty_hint(if app.selected_project.is_some() {
-            "该项目暂无任务"
-        } else {
-            "暂无任务，先添加一个吧"
-        })
-    } else {
-        todo_list(app, visible)
-    });
+    body = body.push(grouped_columns(app, visible));
 
     // 侧边栏展开时并排显示；收起时任务区占满
     let content: Element<'_, Message> = if app.sidebar_visible {
@@ -123,11 +107,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .center_x(Length::Fill);
 
     // 弹窗打开时：内容之上叠加 遮罩（点击关闭）+ 弹窗卡片（不透明，防穿透）
-    // 任务弹窗与项目弹窗互斥（update 层保证），共用同一叠加层
+    // 任务 / 项目 / 归档弹窗互斥（update 层保证），共用同一叠加层
     let dialog = if app.add_dialog.is_some() {
         Some(add_dialog_card(app))
     } else if app.project_dialog.is_some() {
         Some(project_dialog_card(app))
+    } else if app.show_completed {
+        Some(completed_dialog_card(app))
     } else {
         None
     };
@@ -358,6 +344,84 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     .into()
 }
 
+// ---------- 已完成归档弹窗 ----------
+
+/// 已完成任务归档弹窗：按完成时间降序（最近完成在前）展示紧凑行，可删除。
+fn completed_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
+    let mut done: Vec<&Todo> = app
+        .todos
+        .iter()
+        .filter(|todo| todo.status() == TodoStatus::Done)
+        .collect();
+    // 最近完成在前
+    done.sort_by_key(|todo| std::cmp::Reverse(todo.finished_at));
+
+    let list: Element<'_, Message> = if done.is_empty() {
+        text("暂无已完成任务").size(13).color(MUTED).into()
+    } else {
+        column(done.into_iter().map(|todo| done_row(todo, app)))
+            .spacing(6)
+            .padding(2)
+            .into()
+    };
+
+    container(
+        column![
+            text("已完成任务").size(20).font(BOLD),
+            Space::new().height(4),
+            scrollable(list).height(Length::Fill),
+            Space::new().height(2),
+            row![
+                Space::new().width(Length::Fill),
+                button(text("关闭").size(14))
+                    .on_press(Message::CloseCompletedDialog)
+                    .padding([8, 18]),
+            ],
+        ]
+        .spacing(10)
+        .width(Length::Fixed(520.0))
+        .height(Length::Fixed(480.0)),
+    )
+    .padding(20)
+    .style(card_style)
+    .into()
+}
+
+/// 归档弹窗中的紧凑行：标题 + 项目 / 完成时间 / 总耗时 + 删除。
+fn done_row<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
+    let project = todo
+        .project_id
+        .and_then(|id| app.projects.iter().find(|p| p.id == id))
+        .map(|p| p.name.as_str())
+        .unwrap_or("无项目");
+    let finished = todo
+        .finished_at
+        .map(format_time)
+        .unwrap_or_else(|| "—".into());
+    let total = todo
+        .duration(app.now)
+        .map(format_duration)
+        .unwrap_or_else(|| "—".into());
+
+    row![
+        column![
+            text(todo.title.as_str()).size(14).font(BOLD),
+            text(format!("{project} · 完成于 {finished} · 总耗时 {total}"))
+                .size(11)
+                .color(MUTED),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+        button(text("删除").size(12))
+            .on_press(Message::DeleteTodo(todo.id))
+            .style(button::danger)
+            .padding([4, 10]),
+    ]
+    .align_y(Alignment::Center)
+    .spacing(8)
+    .into()
+}
+
 /// 弹窗表单里带小标签的一行（标签在上、输入框在下）。
 fn form_field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     column![text(label).size(13).color(MUTED), input.into()]
@@ -431,10 +495,26 @@ fn project_sidebar(app: &App) -> Element<'_, Message> {
         }
     }
 
+    // 已完成任务数（归档弹窗入口按钮的计数）
+    let completed_count = app
+        .todos
+        .iter()
+        .filter(|todo| todo.status() == TodoStatus::Done)
+        .count();
+
     container(
-        column![header, scrollable(list).height(Length::Fill)]
-            .spacing(10)
-            .height(Length::Fill),
+        column![
+            header,
+            scrollable(list).height(Length::Fill),
+            Space::new().height(4),
+            button(text(format!("已完成 ({completed_count})")).size(13))
+                .on_press(Message::OpenCompletedDialog)
+                .style(button::secondary)
+                .padding([8, 12])
+                .width(Length::Fill),
+        ]
+        .spacing(10)
+        .height(Length::Fill),
     )
     .width(Length::Fixed(SIDEBAR_WIDTH))
     .padding(12)
@@ -442,31 +522,92 @@ fn project_sidebar(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// 单个项目行：选中高亮 + 计数 + 编辑/删除；编辑态切换为内联重命名。
+/// 单个项目行：选中高亮 + 计数 + 编辑/删除；编辑态切换为内联编辑表单（名称 + 起止时间）。
 fn project_row<'a>(
     app: &'a App,
     id: Option<Uuid>,
     name: &'a str,
     count: usize,
 ) -> Element<'a, Message> {
-    // 行内重命名编辑态
-    if app.editing_project.is_some() && app.editing_project == id {
-        return row![
-            text_input("项目名称", &app.project_edit_input)
-                .on_input(Message::ProjectRenameChanged)
-                .on_submit(Message::SaveRenameProject)
-                .padding(6)
-                .width(Length::Fill),
-            Space::new().width(4),
-            button(text("保存").size(12))
-                .on_press(Message::SaveRenameProject)
-                .padding([4, 8]),
-            button(text("取消").size(12))
-                .on_press(Message::CancelRenameProject)
-                .padding([4, 8]),
+    // 行内编辑态：名称 + 开始 / 结束时间 + 保存 / 取消（R20）
+    if app
+        .project_edit
+        .as_ref()
+        .is_some_and(|edit| Some(edit.project_id) == id)
+    {
+        let edit = app
+            .project_edit
+            .as_ref()
+            .expect("编辑态仅在 project_edit 命中该行时渲染");
+
+        // 派生校验（视图实时反馈，update 层保存时再防御一次）
+        let name = edit.name.trim();
+        let name_conflict = !name.is_empty()
+            && app
+                .projects
+                .iter()
+                .any(|p| Some(p.id) != id && p.name == name);
+        let range_invalid = match (&edit.start_parsed, &edit.end_parsed) {
+            (Ok(Some(start)), Ok(Some(finish))) => start >= finish,
+            _ => false,
+        };
+
+        let mut form = column![
+            text_input("项目名称", &edit.name)
+                .id(PROJECT_EDIT_NAME_ID)
+                .on_input(Message::ProjectEditNameChanged)
+                .on_submit(Message::SaveEditProject)
+                .padding(6),
+            labeled_input(
+                "开始时间",
+                "2026-01-31",
+                &edit.start_input,
+                Message::ProjectEditStartChanged,
+            ),
+            labeled_input(
+                "结束时间",
+                "2026-01-31",
+                &edit.end_input,
+                Message::ProjectEditEndChanged,
+            ),
         ]
-        .spacing(4)
-        .align_y(Alignment::Center)
+        .spacing(4);
+
+        if let Err(hint) = &edit.start_parsed {
+            form = form.push(text(hint.as_str()).size(10).color(ERROR_COLOR));
+        }
+        if let Err(hint) = &edit.end_parsed {
+            form = form.push(text(hint.as_str()).size(10).color(ERROR_COLOR));
+        }
+        if name_conflict {
+            form = form.push(text("项目名已存在").size(10).color(ERROR_COLOR));
+        }
+        if range_invalid {
+            form = form.push(text("开始须早于结束").size(10).color(ERROR_COLOR));
+        }
+
+        let can_submit = !name.is_empty()
+            && !name_conflict
+            && edit.start_parsed.is_ok()
+            && edit.end_parsed.is_ok()
+            && !range_invalid;
+
+        return column![
+            form,
+            row![
+                Space::new().width(Length::Fill),
+                button(text("保存").size(12))
+                    .on_press_maybe(can_submit.then_some(Message::SaveEditProject))
+                    .style(button::primary)
+                    .padding([4, 10]),
+                Space::new().width(4),
+                button(text("取消").size(12))
+                    .on_press(Message::CancelEditProject)
+                    .padding([4, 10]),
+            ]
+            .align_y(Alignment::Center),
+        ]
+        .spacing(6)
         .padding([4, 2])
         .into();
     }
@@ -489,7 +630,7 @@ fn project_row<'a>(
         actions = actions
             .push(
                 button(text("编辑").size(12))
-                    .on_press(Message::StartRenameProject(project_id))
+                    .on_press(Message::StartEditProject(project_id))
                     .style(button::text)
                     .padding([2, 6]),
             )
@@ -512,6 +653,24 @@ fn project_row<'a>(
         .padding([4, 8])
         .style(move |theme| project_row_style(theme, selected))
         .into()
+}
+
+/// 带小标签的窄输入框（侧边栏内联编辑用），回车即保存。
+fn labeled_input<'a>(
+    label: &'a str,
+    placeholder: &'a str,
+    value: &'a str,
+    on_input: fn(String) -> Message,
+) -> Element<'a, Message> {
+    column![
+        text(label).size(11).color(MUTED),
+        text_input(placeholder, value)
+            .on_input(on_input)
+            .on_submit(Message::SaveEditProject)
+            .padding(6),
+    ]
+    .spacing(2)
+    .into()
 }
 
 /// 项目起止时间的小字展示（仅显示已设置的一端）：
@@ -557,13 +716,64 @@ fn project_row_style(theme: &iced::Theme, selected: bool) -> container::Style {
 
 // ---------- 任务列表 ----------
 
-/// 可滚动的任务列表（已按筛选过滤）。
-fn todo_list<'a>(app: &'a App, todos: Vec<&'a Todo>) -> Element<'a, Message> {
-    scrollable(
+/// 双列分组显示：左列=未开始、右列=进行中，各自独立滚动；
+/// 组内按截止时间升序（无截止排后，稳定排序）；已完成任务不在此显示（见归档弹窗）。
+fn grouped_columns<'a>(app: &'a App, todos: Vec<&'a Todo>) -> Element<'a, Message> {
+    if todos.is_empty() {
+        return empty_hint(if app.selected_project.is_some() {
+            "该项目暂无任务"
+        } else {
+            "暂无任务，先添加一个吧"
+        });
+    }
+
+    let mut pending: Vec<&Todo> = todos
+        .iter()
+        .copied()
+        .filter(|todo| todo.status() == TodoStatus::Pending)
+        .collect();
+    pending.sort_by_key(|todo| todo.due_order_key());
+
+    let mut in_progress: Vec<&Todo> = todos
+        .iter()
+        .copied()
+        .filter(|todo| todo.status() == TodoStatus::InProgress)
+        .collect();
+    in_progress.sort_by_key(|todo| todo.due_order_key());
+
+    row![
+        group_column("未开始", "暂无未开始任务", pending, app),
+        Space::new().width(12),
+        group_column("进行中", "暂无进行中任务", in_progress, app),
+    ]
+    .height(Length::Fill)
+    .into()
+}
+
+/// 单个分组列：标题 + 计数 + 可滚动卡片列表；空组显示提示。
+fn group_column<'a>(
+    title: &'static str,
+    empty: &'static str,
+    todos: Vec<&'a Todo>,
+    app: &'a App,
+) -> Element<'a, Message> {
+    let count = todos.len();
+    let list: Element<'_, Message> = if todos.is_empty() {
+        empty_hint(empty)
+    } else {
         column(todos.into_iter().map(|todo| todo_card(todo, app)))
             .spacing(8)
-            .padding(4),
-    )
+            .padding(4)
+            .into()
+    };
+
+    column![
+        text(format!("{title} ({count})")).size(14).font(BOLD),
+        Space::new().height(4),
+        scrollable(list).height(Length::Fill),
+    ]
+    .spacing(4)
+    .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }

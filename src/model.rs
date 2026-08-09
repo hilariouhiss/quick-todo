@@ -62,7 +62,8 @@ pub struct Todo {
 }
 
 impl Todo {
-    /// 创建一条新任务（快捷添加：仅标题，无描述）。
+    /// 创建一条**仅标题**的新任务（无描述 / 无项目 / 无截止时间；
+    /// 弹窗提交的纯标题场景使用，全字段走 `new_full`）。
     pub fn new(title: String, now: DateTime<Utc>) -> Self {
         Self::new_full(title, String::new(), None, None, now)
     }
@@ -108,6 +109,12 @@ impl Todo {
             (Some(start), None) => Some(now - start),
             (None, _) => None,
         }
+    }
+
+    /// 组内排序键：截止时间升序（最近截止在前），**无截止时间排后**。
+    /// 返回 `(是否无截止, 截止时间)`，直接按元组排序即可；稳定排序下同键保持原顺序。
+    pub fn due_order_key(&self) -> (bool, Option<DateTime<Utc>>) {
+        (self.due_at.is_none(), self.due_at)
     }
 }
 
@@ -207,6 +214,23 @@ impl Default for ProjectDialog {
             end_parsed: Ok(None),
         }
     }
+}
+
+/// 侧边栏内联编辑项目的表单状态（纯内存，不持久化；`App.project_edit = None` 表示未处于编辑态）。
+#[derive(Debug, Clone)]
+pub struct ProjectEdit {
+    /// 正在编辑的项目 id
+    pub project_id: Uuid,
+    /// 名称输入
+    pub name: String,
+    /// 开始时间输入框的原始文本
+    pub start_input: String,
+    /// 开始时间的实时解析结果（同 `ProjectDialog.start_parsed`）
+    pub start_parsed: Result<Option<DateTime<Utc>>, String>,
+    /// 结束时间输入框的原始文本
+    pub end_input: String,
+    /// 结束时间的实时解析结果（同 `ProjectDialog.end_parsed`）
+    pub end_parsed: Result<Option<DateTime<Utc>>, String>,
 }
 
 /// 卡片编辑任务的表单状态（纯内存，不持久化；`App.todo_edit = None` 表示无卡片处于编辑态）。
@@ -321,14 +345,8 @@ pub struct App {
     pub todos: Vec<Todo>,
     /// 项目列表，保持创建顺序
     pub projects: Vec<Project>,
-    /// 输入框当前文本
-    pub input: String,
     /// 当前筛选的项目（`None` = 全部）
     pub selected_project: Option<Uuid>,
-    /// 正在内联重命名的项目（`None` = 无）
-    pub editing_project: Option<Uuid>,
-    /// 重命名输入框当前文本
-    pub project_edit_input: String,
     /// 加载 / 保存出错时的提示
     pub error: Option<String>,
     /// "当前时间"，由每秒的时钟订阅刷新，用于实时耗时显示
@@ -339,6 +357,10 @@ pub struct App {
     pub add_dialog: Option<AddDialog>,
     /// 弹窗添加项目表单（`None` = 弹窗关闭；纯内存状态，不持久化）
     pub project_dialog: Option<ProjectDialog>,
+    /// 已完成归档弹窗是否打开（纯 UI 状态，不持久化）
+    pub show_completed: bool,
+    /// 侧边栏内联编辑项目表单（`None` = 未处于编辑态；纯内存状态，不持久化）
+    pub project_edit: Option<ProjectEdit>,
     /// 卡片编辑表单（`None` = 无卡片处于编辑态；纯内存状态，不持久化）
     pub todo_edit: Option<TodoEdit>,
 }
@@ -348,15 +370,14 @@ impl Default for App {
         Self {
             todos: Vec::new(),
             projects: Vec::new(),
-            input: String::new(),
             selected_project: None,
-            editing_project: None,
-            project_edit_input: String::new(),
             error: None,
             now: Utc::now(),
             sidebar_visible: false,
             add_dialog: None,
             project_dialog: None,
+            show_completed: false,
+            project_edit: None,
             todo_edit: None,
         }
     }
@@ -436,6 +457,35 @@ mod tests {
         assert_eq!(
             todo.duration(dt(1_700_000_999)),
             Some(Duration::seconds(150))
+        );
+    }
+
+    #[test]
+    fn due_order_key_puts_undated_last() {
+        let now = dt(1_700_000_000);
+        let early = dt(1_700_000_100);
+        let late = dt(1_700_000_200);
+
+        let no_due = Todo::new("无截止".into(), now);
+        let mut due_early = Todo::new("早截止".into(), now);
+        let mut due_late = Todo::new("晚截止".into(), now);
+        due_early.due_at = Some(early);
+        due_late.due_at = Some(late);
+
+        // 有截止 < 无截止；同有截止时按时间升序
+        let mut keys = [
+            no_due.due_order_key(),
+            due_early.due_order_key(),
+            due_late.due_order_key(),
+        ];
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                due_early.due_order_key(),
+                due_late.due_order_key(),
+                no_due.due_order_key(),
+            ]
         );
     }
 

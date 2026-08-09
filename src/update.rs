@@ -9,19 +9,15 @@ use iced::Task;
 use uuid::Uuid;
 
 use crate::model::{
-    AddDialog, App, Project, ProjectDialog, QuickDue, Todo, TodoEdit, TodoStatus, format_due,
-    parse_datetime,
+    AddDialog, App, Project, ProjectDialog, ProjectEdit, QuickDue, Todo, TodoEdit, TodoStatus,
+    format_due, parse_datetime,
 };
 use crate::storage::{self, Store};
-use crate::view::{DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID};
+use crate::view::{DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID, PROJECT_EDIT_NAME_ID};
 
 /// 应用内所有可触发的消息。
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// 输入框内容变化
-    InputChanged(String),
-    /// 添加任务（回车或点击"添加"）
-    AddTodo,
     /// 开始任务：记录开始时间
     StartTodo(Uuid),
     /// 完成任务：记录结束时间
@@ -46,14 +42,22 @@ pub enum Message {
     ProjectEndChanged(String),
     /// 弹窗：点击"创建"/回车（校验通过后创建项目并落盘）
     SubmitProjectDialog,
-    /// 开始重命名项目：进入编辑态并预填当前名称
-    StartRenameProject(Uuid),
-    /// 重命名输入框内容变化
-    ProjectRenameChanged(String),
-    /// 保存重命名（校验通过后提交并退出编辑态）
-    SaveRenameProject,
-    /// 取消重命名：退出编辑态
-    CancelRenameProject,
+    /// 打开已完成归档弹窗（纯 UI 状态，不落盘）
+    OpenCompletedDialog,
+    /// 关闭已完成归档弹窗（纯 UI 状态，不落盘）
+    CloseCompletedDialog,
+    /// 开始编辑项目：进入侧边栏内联编辑态并预填名称与起止时间
+    StartEditProject(Uuid),
+    /// 编辑：名称输入框变化
+    ProjectEditNameChanged(String),
+    /// 编辑：开始时间输入框变化（实时解析校验）
+    ProjectEditStartChanged(String),
+    /// 编辑：结束时间输入框变化（实时解析校验）
+    ProjectEditEndChanged(String),
+    /// 保存项目编辑（校验通过后就地更新并落盘）
+    SaveEditProject,
+    /// 取消项目编辑：退出编辑态
+    CancelEditProject,
     /// 删除项目（其下任务自动解除归属）
     DeleteProject(Uuid),
     /// 选中项目筛选（`None` = 全部）
@@ -76,11 +80,11 @@ pub enum Message {
     SaveEditTodo,
     /// 收起 / 展开项目侧边栏（纯 UI 状态，不触发落盘）
     ToggleSidebar,
-    /// 打开弹窗添加任务（预选当前筛选的项目）
+    /// 打开弹窗添加任务（唯一添加入口，预选当前筛选的项目）
     OpenAddDialog,
     /// 关闭弹窗添加任务（丢弃已填内容，不落盘）
     CloseAddDialog,
-    /// 关闭当前打开的弹窗（任务或项目；点击遮罩 / Esc 触发）
+    /// 关闭当前打开的弹窗（任务 / 项目 / 已完成归档；点击遮罩 / Esc 触发）
     CloseActiveDialog,
     /// 弹窗：标题输入框变化
     DialogTitleChanged(String),
@@ -99,18 +103,6 @@ pub enum Message {
 /// 处理消息，更新应用状态；必要时返回副作用任务（异步落盘）。
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
-        Message::InputChanged(text) => app.input = text,
-
-        Message::AddTodo => {
-            let title = app.input.trim().to_owned();
-            if !title.is_empty() {
-                // 创建时立即记录创建时间；快捷添加仅标题（描述经弹窗填写）
-                app.todos.insert(0, Todo::new(title, app.now));
-                app.input.clear();
-                return persist(app);
-            }
-        }
-
         Message::StartTodo(id) => {
             if let Some(todo) = app.todos.iter_mut().find(|todo| todo.id == id) {
                 // 只有"未开始"的任务可以开始
@@ -149,8 +141,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::Tick(now) => app.now = now,
 
         Message::OpenProjectDialog => {
-            // 弹窗互斥：打开项目弹窗时关闭任务弹窗
+            // 弹窗互斥：打开项目弹窗时关闭任务弹窗与归档弹窗
             app.add_dialog = None;
+            app.show_completed = false;
             app.project_dialog = Some(ProjectDialog::default());
             // 聚焦弹窗名称输入框（下一次渲染生效）
             return iced::widget::operation::focus(PROJECT_DIALOG_NAME_ID);
@@ -228,38 +221,108 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             return persist(app);
         }
 
-        Message::StartRenameProject(id) => {
+        Message::OpenCompletedDialog => {
+            // 弹窗互斥：打开归档弹窗时关闭任务 / 项目弹窗
+            app.add_dialog = None;
+            app.project_dialog = None;
+            app.show_completed = true;
+        }
+
+        Message::CloseCompletedDialog => {
+            // 关闭归档弹窗（纯 UI 状态，不落盘）
+            app.show_completed = false;
+        }
+
+        Message::StartEditProject(id) => {
             if let Some(project) = app.projects.iter().find(|p| p.id == id) {
-                app.editing_project = Some(id);
-                app.project_edit_input = project.name.clone();
+                // 预填当前字段；起止时间回填为可解析文本（分钟粒度）
+                app.project_edit = Some(ProjectEdit {
+                    project_id: id,
+                    name: project.name.clone(),
+                    start_input: project.started_at.map(format_due).unwrap_or_default(),
+                    start_parsed: Ok(project.started_at),
+                    end_input: project.finished_at.map(format_due).unwrap_or_default(),
+                    end_parsed: Ok(project.finished_at),
+                });
+                // 聚焦编辑名称输入框（下一次渲染生效）
+                return iced::widget::operation::focus(PROJECT_EDIT_NAME_ID);
             }
         }
 
-        Message::ProjectRenameChanged(text) => app.project_edit_input = text,
+        Message::ProjectEditNameChanged(text) => {
+            if let Some(edit) = &mut app.project_edit {
+                edit.name = text;
+            }
+        }
 
-        Message::SaveRenameProject => {
-            let Some(id) = app.editing_project else {
+        Message::ProjectEditStartChanged(text) => {
+            if let Some(edit) = &mut app.project_edit {
+                // 实时解析：非法格式立即提示（start_parsed 缓存结果）
+                edit.start_parsed = parse_datetime(&text);
+                edit.start_input = text;
+            }
+        }
+
+        Message::ProjectEditEndChanged(text) => {
+            if let Some(edit) = &mut app.project_edit {
+                // 实时解析：非法格式立即提示（end_parsed 缓存结果）
+                edit.end_parsed = parse_datetime(&text);
+                edit.end_input = text;
+            }
+        }
+
+        Message::SaveEditProject => {
+            // 校验不通过时保持编辑态（保留用户输入），不产生任何副作用
+            let Some(edit) = app.project_edit.take() else {
                 return Task::none();
             };
-            let name = app.project_edit_input.trim().to_owned();
-            let valid =
-                !name.is_empty() && !app.projects.iter().any(|p| p.id != id && p.name == name);
-            match app.projects.iter_mut().find(|p| p.id == id) {
-                // 名称非法（空 / 与其他项目重名）：保持编辑态，等待用户修改
-                Some(project) if valid => {
-                    project.name = name;
-                    app.editing_project = None;
-                    return persist(app);
-                }
-                Some(_) => {}
-                // 项目已被删除：退出编辑态
-                None => app.editing_project = None,
+            let restore = |app: &mut App| app.project_edit = Some(edit.clone());
+
+            let name = edit.name.trim().to_owned();
+            if name.is_empty()
+                || app
+                    .projects
+                    .iter()
+                    .any(|p| p.id != edit.project_id && p.name == name)
+            {
+                restore(app);
+                return Task::none();
             }
+            let started_at = match edit.start_parsed {
+                Ok(time) => time,
+                Err(_) => {
+                    restore(app);
+                    return Task::none();
+                }
+            };
+            let finished_at = match edit.end_parsed {
+                Ok(time) => time,
+                Err(_) => {
+                    restore(app);
+                    return Task::none();
+                }
+            };
+            // 起止时间同时设置时必须满足：开始早于结束
+            if let (Some(start), Some(finish)) = (started_at, finished_at)
+                && start >= finish
+            {
+                restore(app);
+                return Task::none();
+            }
+
+            if let Some(project) = app.projects.iter_mut().find(|p| p.id == edit.project_id) {
+                // 校验通过：就地更新名称与起止时间并退出编辑态
+                project.name = name;
+                project.started_at = started_at;
+                project.finished_at = finished_at;
+                return persist(app);
+            }
+            // 项目已被删除：退出编辑态（无副作用）
         }
 
-        Message::CancelRenameProject => {
-            app.editing_project = None;
-            app.project_edit_input.clear();
+        Message::CancelEditProject => {
+            // 退出编辑态：丢弃修改（编辑表单是纯内存状态，不落盘）
+            app.project_edit = None;
         }
 
         Message::DeleteProject(id) => {
@@ -276,9 +339,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 if app.selected_project == Some(id) {
                     app.selected_project = None;
                 }
-                if app.editing_project == Some(id) {
-                    app.editing_project = None;
-                    app.project_edit_input.clear();
+                if app
+                    .project_edit
+                    .as_ref()
+                    .is_some_and(|e| e.project_id == id)
+                {
+                    app.project_edit = None;
                 }
                 return persist(app);
             }
@@ -289,8 +355,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::ToggleSidebar => app.sidebar_visible = !app.sidebar_visible,
 
         Message::OpenAddDialog => {
-            // 弹窗互斥：打开任务弹窗时关闭项目弹窗
+            // 弹窗互斥：打开任务弹窗时关闭项目弹窗与归档弹窗
             app.project_dialog = None;
+            app.show_completed = false;
             // 弹窗打开：处于项目筛选时预选该项目，作为默认归属
             app.add_dialog = Some(AddDialog {
                 project_id: app.selected_project,
@@ -309,8 +376,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // 弹窗互斥，当前只可能打开一个：关闭打开的那个
             if app.add_dialog.is_some() {
                 app.add_dialog = None;
-            } else {
+            } else if app.project_dialog.is_some() {
                 app.project_dialog = None;
+            } else {
+                app.show_completed = false;
             }
         }
 
@@ -382,10 +451,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
             // 校验通过：创建任务（插最前、时间取自 app.now）并关闭弹窗
             let description = dialog.description.trim().to_owned();
-            app.todos.insert(
-                0,
-                Todo::new_full(title, description, dialog.project_id, due_at, app.now),
-            );
+            let todo = if description.is_empty() && dialog.project_id.is_none() && due_at.is_none()
+            {
+                // 纯标题场景
+                Todo::new(title, app.now)
+            } else {
+                Todo::new_full(title, description, dialog.project_id, due_at, app.now)
+            };
+            app.todos.insert(0, todo);
             app.add_dialog = None;
             return persist(app);
         }
@@ -517,9 +590,11 @@ mod tests {
         }
     }
 
+    /// 通过任务弹窗添加任务（唯一添加入口）并返回其 id
     fn add_todo(app: &mut App, title: &str) -> Uuid {
-        app.input = title.into();
-        let _ = update(app, Message::AddTodo);
+        let _ = update(app, Message::OpenAddDialog);
+        let _ = update(app, Message::DialogTitleChanged(title.into()));
+        let _ = update(app, Message::SubmitAddDialog);
         app.todos[0].id
     }
     /// 直接构造项目（弹窗创建路径由 submit_project_dialog 系列测试覆盖）
@@ -529,40 +604,27 @@ mod tests {
     }
 
     #[test]
-    fn add_todo_records_creation_time_and_clears_input() {
+    fn add_via_dialog_records_creation_time() {
         let now = Utc::now();
         let mut app = app_with(now);
-        app.input = "  写周报  ".into();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("  写周报  ".into()));
 
-        let _ = update(&mut app, Message::AddTodo);
+        let _ = update(&mut app, Message::SubmitAddDialog);
 
         assert_eq!(app.todos.len(), 1);
         assert_eq!(app.todos[0].title, "写周报"); // 自动去除首尾空白
         assert_eq!(app.todos[0].created_at, now); // 创建时间被记录
-        assert_eq!(app.todos[0].description, ""); // 快捷添加不带描述
+        assert_eq!(app.todos[0].description, "");
         assert_eq!(app.todos[0].status(), TodoStatus::Pending);
-        assert!(app.input.is_empty());
-    }
-
-    #[test]
-    fn blank_title_is_ignored() {
-        let mut app = App {
-            input: "   ".into(),
-            ..App::default()
-        };
-
-        let _ = update(&mut app, Message::AddTodo);
-
-        assert!(app.todos.is_empty());
-        assert!(!app.input.is_empty()); // 输入内容保留，便于用户修改
+        assert!(app.add_dialog.is_none()); // 提交后弹窗关闭
     }
 
     #[test]
     fn add_puts_newest_first() {
         let mut app = App::default();
         for i in 0..3 {
-            app.input = format!("任务 {i}");
-            let _ = update(&mut app, Message::AddTodo);
+            add_todo(&mut app, &format!("任务 {i}"));
         }
         assert_eq!(app.todos[0].title, "任务 2");
     }
@@ -647,6 +709,37 @@ mod tests {
     }
 
     #[test]
+    fn completed_dialog_is_mutually_exclusive() {
+        let mut app = App::default();
+        // 打开归档弹窗：关闭任务 / 项目弹窗
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::OpenCompletedDialog);
+        assert!(app.show_completed);
+        assert!(app.add_dialog.is_none());
+
+        // 打开项目弹窗：关闭归档弹窗
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        assert!(app.project_dialog.is_some());
+        assert!(!app.show_completed);
+
+        // 打开任务弹窗：关闭项目弹窗
+        let _ = update(&mut app, Message::OpenAddDialog);
+        assert!(app.add_dialog.is_some());
+        assert!(app.project_dialog.is_none());
+        assert!(!app.show_completed);
+    }
+
+    #[test]
+    fn close_completed_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenCompletedDialog);
+        assert!(app.show_completed);
+
+        let _ = update(&mut app, Message::CloseCompletedDialog);
+        assert!(!app.show_completed);
+    }
+
+    #[test]
     fn close_project_dialog_discards_input() {
         let mut app = App::default();
         let _ = update(&mut app, Message::OpenProjectDialog);
@@ -672,10 +765,16 @@ mod tests {
         let _ = update(&mut app, Message::CloseActiveDialog);
         assert!(app.project_dialog.is_none());
 
+        // 归档弹窗打开时关闭归档弹窗
+        let _ = update(&mut app, Message::OpenCompletedDialog);
+        let _ = update(&mut app, Message::CloseActiveDialog);
+        assert!(!app.show_completed);
+
         // 无弹窗打开时无副作用
         let _ = update(&mut app, Message::CloseActiveDialog);
         assert!(app.add_dialog.is_none());
         assert!(app.project_dialog.is_none());
+        assert!(!app.show_completed);
     }
 
     #[test]
@@ -809,53 +908,161 @@ mod tests {
     }
 
     #[test]
-    fn rename_project_prefills_and_commits() {
-        let mut app = App::default();
+    fn start_edit_project_prefills_fields() {
+        let now = Utc::now();
+        let mut app = app_with(now);
         let id = add_project(&mut app, "工作");
+        app.projects[0].started_at = Some(now);
+        app.projects[0].finished_at = Some(now + chrono::Duration::days(30));
 
-        let _ = update(&mut app, Message::StartRenameProject(id));
-        assert_eq!(app.editing_project, Some(id));
-        assert_eq!(app.project_edit_input, "工作"); // 预填当前名称
+        let _ = update(&mut app, Message::StartEditProject(id));
 
-        app.project_edit_input = " 个人  ".into();
-        let _ = update(&mut app, Message::SaveRenameProject);
-
-        assert_eq!(app.projects[0].name, "个人"); // trim 后提交
-        assert_eq!(app.editing_project, None);
+        let edit = app.project_edit.as_ref().unwrap();
+        assert_eq!(edit.project_id, id);
+        assert_eq!(edit.name, "工作");
+        assert!(!edit.start_input.is_empty()); // 起止时间回填为可解析文本
+        assert!(!edit.end_input.is_empty());
+        assert!(edit.start_parsed.is_ok());
+        assert!(edit.end_parsed.is_ok());
     }
 
     #[test]
-    fn rename_to_blank_or_duplicate_keeps_editing() {
+    fn edit_project_unknown_id_is_noop() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::StartEditProject(Uuid::now_v7()));
+        assert!(app.project_edit.is_none());
+    }
+
+    #[test]
+    fn edit_project_inputs_update_form() {
+        let mut app = App::default();
+        let id = add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::StartEditProject(id));
+
+        let _ = update(&mut app, Message::ProjectEditNameChanged(" 个人  ".into()));
+        let _ = update(
+            &mut app,
+            Message::ProjectEditStartChanged("2026-01-01".into()),
+        );
+        let _ = update(
+            &mut app,
+            Message::ProjectEditEndChanged("2026-01-31".into()),
+        );
+
+        let edit = app.project_edit.as_ref().unwrap();
+        assert_eq!(edit.name, " 个人  ");
+        assert!(edit.start_parsed.as_ref().unwrap().is_some());
+        assert!(edit.end_parsed.as_ref().unwrap().is_some());
+    }
+
+    #[test]
+    fn save_edit_project_commits_name_and_times() {
+        let now = Utc::now();
+        let mut app = app_with(now);
+        let id = add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::StartEditProject(id));
+        let _ = update(&mut app, Message::ProjectEditNameChanged("  个人  ".into()));
+        let _ = update(
+            &mut app,
+            Message::ProjectEditStartChanged("2026-01-01".into()),
+        );
+        let _ = update(
+            &mut app,
+            Message::ProjectEditEndChanged("2026-01-31 18:30".into()),
+        );
+
+        let _ = update(&mut app, Message::SaveEditProject);
+
+        assert!(app.project_edit.is_none()); // 退出编辑态
+        let project = &app.projects[0];
+        assert_eq!(project.name, "个人"); // trim 后提交
+        assert!(project.started_at.is_some());
+        assert!(project.finished_at.is_some());
+        assert_eq!(project.created_at, now); // 创建时间不受影响
+    }
+
+    #[test]
+    fn save_edit_project_blank_or_duplicate_keeps_editing() {
         let mut app = App::default();
         let id = add_project(&mut app, "工作");
         add_project(&mut app, "生活");
+        let _ = update(&mut app, Message::StartEditProject(id));
 
         // 空名称
-        let _ = update(&mut app, Message::StartRenameProject(id));
-        app.project_edit_input = "   ".into();
-        let _ = update(&mut app, Message::SaveRenameProject);
+        let _ = update(&mut app, Message::ProjectEditNameChanged("   ".into()));
+        let _ = update(&mut app, Message::SaveEditProject);
         assert_eq!(app.projects[0].name, "工作");
-        assert_eq!(app.editing_project, Some(id)); // 保持编辑态
+        assert!(app.project_edit.is_some()); // 保持编辑态
 
         // 与其他项目重名
-        app.project_edit_input = "生活".into();
-        let _ = update(&mut app, Message::SaveRenameProject);
+        let _ = update(&mut app, Message::ProjectEditNameChanged("生活".into()));
+        let _ = update(&mut app, Message::SaveEditProject);
         assert_eq!(app.projects[0].name, "工作");
-        assert_eq!(app.editing_project, Some(id)); // 保持编辑态
+        assert!(app.project_edit.is_some());
+
+        // 与自身同名（重名校验排除自身）：允许提交
+        let _ = update(&mut app, Message::ProjectEditNameChanged("工作".into()));
+        let _ = update(&mut app, Message::SaveEditProject);
+        assert!(app.project_edit.is_none());
+        assert_eq!(app.projects[0].name, "工作");
     }
 
     #[test]
-    fn cancel_rename_exits_editing() {
+    fn save_edit_project_invalid_times_keep_editing() {
         let mut app = App::default();
         let id = add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::StartEditProject(id));
 
-        let _ = update(&mut app, Message::StartRenameProject(id));
-        app.project_edit_input = "改到一半".into();
-        let _ = update(&mut app, Message::CancelRenameProject);
+        // 时间格式非法
+        let _ = update(&mut app, Message::ProjectEditStartChanged("后天".into()));
+        let _ = update(&mut app, Message::SaveEditProject);
+        assert!(app.project_edit.is_some());
+        assert_eq!(app.projects[0].started_at, None);
 
-        assert_eq!(app.editing_project, None);
-        assert!(app.project_edit_input.is_empty());
+        // 开始 ≥ 结束
+        let _ = update(
+            &mut app,
+            Message::ProjectEditStartChanged("2026-02-01".into()),
+        );
+        let _ = update(
+            &mut app,
+            Message::ProjectEditEndChanged("2026-01-31".into()),
+        );
+        let _ = update(&mut app, Message::SaveEditProject);
+        assert!(app.project_edit.is_some());
+        assert_eq!(app.projects[0].started_at, None);
+    }
+
+    #[test]
+    fn cancel_edit_project_discards_changes() {
+        let mut app = App::default();
+        let id = add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::StartEditProject(id));
+        let _ = update(&mut app, Message::ProjectEditNameChanged("改到一半".into()));
+
+        let _ = update(&mut app, Message::CancelEditProject);
+
+        assert!(app.project_edit.is_none());
         assert_eq!(app.projects[0].name, "工作"); // 名称未变
+    }
+
+    #[test]
+    fn save_edit_project_deleted_project_exits_editing() {
+        let mut app = App::default();
+        let id = add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::StartEditProject(id));
+        app.projects.clear(); // 项目在编辑期间被删除
+
+        let _ = update(&mut app, Message::SaveEditProject);
+
+        assert!(app.project_edit.is_none()); // 仅退出编辑态，无副作用
+    }
+
+    #[test]
+    fn save_without_editing_project_is_noop() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::SaveEditProject);
+        assert!(app.projects.is_empty());
     }
 
     #[test]
@@ -869,7 +1076,7 @@ mod tests {
             .unwrap()
             .project_id = Some(pid);
         let _ = update(&mut app, Message::SelectProject(Some(pid)));
-        let _ = update(&mut app, Message::StartRenameProject(pid));
+        let _ = update(&mut app, Message::StartEditProject(pid));
         assert_eq!(app.todos[0].project_id, Some(pid));
 
         let _ = update(&mut app, Message::DeleteProject(pid));
@@ -877,7 +1084,7 @@ mod tests {
         assert!(app.projects.is_empty());
         assert_eq!(app.todos[0].project_id, None); // 任务保留，归属解除
         assert_eq!(app.selected_project, None); // 筛选复位
-        assert_eq!(app.editing_project, None); // 编辑态复位
+        assert!(app.project_edit.is_none()); // 编辑态复位
     }
 
     #[test]

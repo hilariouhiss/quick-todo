@@ -112,19 +112,42 @@ impl Todo {
 }
 
 /// 一个项目：任务的可选归属容器。
+///
+/// - `started_at` / `finished_at`：可选起止时间（`None` = 未设置；仅创建时设置）
+/// - `created_at`：创建时间（创建时自动记录，不可为空）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: Uuid,
     pub name: String,
+    /// 项目开始时间（可选，`None` = 未设置）。
+    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    /// 项目结束时间（可选，`None` = 未设置）。
+    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
 impl Project {
-    /// 创建一条新项目（此时即记录创建时间）。
+    /// 创建一条新项目（无起止时间，此时即记录创建时间）。
     pub fn new(name: String, now: DateTime<Utc>) -> Self {
+        Self::new_full(name, None, None, now)
+    }
+
+    /// 创建一条带可选起止时间的项目（弹窗添加用）。
+    pub fn new_full(
+        name: String,
+        started_at: Option<DateTime<Utc>>,
+        finished_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Self {
         Self {
             id: Uuid::now_v7(),
             name,
+            started_at,
+            finished_at,
             created_at: now,
         }
     }
@@ -154,6 +177,34 @@ impl Default for AddDialog {
             project_id: None,
             due_input: String::new(),
             due_parsed: Ok(None),
+        }
+    }
+}
+
+/// 弹窗添加项目的表单状态（纯内存，不持久化；`App.project_dialog = None` 表示弹窗关闭）。
+#[derive(Debug, Clone)]
+pub struct ProjectDialog {
+    /// 名称输入
+    pub name: String,
+    /// 开始时间输入框的原始文本
+    pub start_input: String,
+    /// 开始时间的实时解析结果：
+    /// `Ok(None)` = 留空；`Ok(Some)` = 解析成功；`Err` = 格式错误提示
+    pub start_parsed: Result<Option<DateTime<Utc>>, String>,
+    /// 结束时间输入框的原始文本
+    pub end_input: String,
+    /// 结束时间的实时解析结果（同 `start_parsed`）
+    pub end_parsed: Result<Option<DateTime<Utc>>, String>,
+}
+
+impl Default for ProjectDialog {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            start_input: String::new(),
+            start_parsed: Ok(None),
+            end_input: String::new(),
+            end_parsed: Ok(None),
         }
     }
 }
@@ -218,14 +269,14 @@ impl QuickDue {
     }
 }
 
-/// 解析截止时间输入文本（本地时区语义，存储转 UTC）。
+/// 解析日期时间输入文本（本地时区语义，存储转 UTC）。任务截止时间与项目起止时间共用。
 ///
-/// - 空串 → `Ok(None)`（无截止时间）
-/// - `YYYY-MM-DD` → 本地当天 **23:59:59**（"截止到当天结束"）
+/// - 空串 → `Ok(None)`（未设置）
+/// - `YYYY-MM-DD` → 本地当天 **23:59:59**（"当天结束"）
 /// - `YYYY-MM-DD HH:MM` / `YYYY-MM-DD HH:MM:SS` → 精确时刻
 /// - 其他 → `Err(提示文案)`
-pub fn parse_due(input: &str) -> Result<Option<DateTime<Utc>>, String> {
-    const FORMAT_HINT: &str = "截止时间格式：2026-01-31 或 2026-01-31 18:30";
+pub fn parse_datetime(input: &str) -> Result<Option<DateTime<Utc>>, String> {
+    const FORMAT_HINT: &str = "时间格式：2026-01-31 或 2026-01-31 18:30";
 
     let input = input.trim();
     if input.is_empty() {
@@ -256,7 +307,7 @@ fn local_to_utc(naive: NaiveDateTime) -> Result<DateTime<Utc>, String> {
     }
 }
 
-/// 截止时间 → 输入框回填文本（本地时区、分钟粒度，可被 `parse_due` 解析）。
+/// 截止时间 → 输入框回填文本（本地时区、分钟粒度，可被 `parse_datetime` 解析）。
 pub fn format_due(dt: DateTime<Utc>) -> String {
     dt.with_timezone(&Local)
         .format("%Y-%m-%d %H:%M")
@@ -272,8 +323,6 @@ pub struct App {
     pub projects: Vec<Project>,
     /// 输入框当前文本
     pub input: String,
-    /// 新建项目输入框当前文本
-    pub project_input: String,
     /// 当前筛选的项目（`None` = 全部）
     pub selected_project: Option<Uuid>,
     /// 正在内联重命名的项目（`None` = 无）
@@ -288,6 +337,8 @@ pub struct App {
     pub sidebar_visible: bool,
     /// 弹窗添加任务表单（`None` = 弹窗关闭；纯内存状态，不持久化）
     pub add_dialog: Option<AddDialog>,
+    /// 弹窗添加项目表单（`None` = 弹窗关闭；纯内存状态，不持久化）
+    pub project_dialog: Option<ProjectDialog>,
     /// 卡片编辑表单（`None` = 无卡片处于编辑态；纯内存状态，不持久化）
     pub todo_edit: Option<TodoEdit>,
 }
@@ -298,7 +349,6 @@ impl Default for App {
             todos: Vec::new(),
             projects: Vec::new(),
             input: String::new(),
-            project_input: String::new(),
             selected_project: None,
             editing_project: None,
             project_edit_input: String::new(),
@@ -306,6 +356,7 @@ impl Default for App {
             now: Utc::now(),
             sidebar_visible: false,
             add_dialog: None,
+            project_dialog: None,
             todo_edit: None,
         }
     }
@@ -448,14 +499,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_due_empty_means_no_due() {
-        assert_eq!(parse_due("").unwrap(), None);
-        assert_eq!(parse_due("   ").unwrap(), None);
+    fn parse_datetime_empty_means_no_due() {
+        assert_eq!(parse_datetime("").unwrap(), None);
+        assert_eq!(parse_datetime("   ").unwrap(), None);
     }
 
     #[test]
-    fn parse_due_date_means_end_of_day() {
-        let due = parse_due("2026-01-31").unwrap().unwrap();
+    fn parse_datetime_date_means_end_of_day() {
+        let due = parse_datetime("2026-01-31").unwrap().unwrap();
         let local = due.with_timezone(&Local);
         assert_eq!(
             local.format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -464,15 +515,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_due_datetime_keeps_minutes() {
-        let due = parse_due("2026-01-31 18:30").unwrap().unwrap();
+    fn parse_datetime_datetime_keeps_minutes() {
+        let due = parse_datetime("2026-01-31 18:30").unwrap().unwrap();
         let local = due.with_timezone(&Local);
         assert_eq!(
             local.format("%Y-%m-%d %H:%M").to_string(),
             "2026-01-31 18:30"
         );
 
-        let with_seconds = parse_due("2026-01-31 18:30:45").unwrap().unwrap();
+        let with_seconds = parse_datetime("2026-01-31 18:30:45").unwrap().unwrap();
         let local = with_seconds.with_timezone(&Local);
         assert_eq!(
             local.format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -481,13 +532,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_due_whitespace_is_trimmed() {
-        let due = parse_due("  2026-01-31  ").unwrap();
+    fn parse_datetime_whitespace_is_trimmed() {
+        let due = parse_datetime("  2026-01-31  ").unwrap();
         assert!(due.is_some());
     }
 
     #[test]
-    fn parse_due_invalid_returns_hint() {
+    fn parse_datetime_invalid_returns_hint() {
         for bad in [
             "明天",
             "2026-13-45",
@@ -495,14 +546,14 @@ mod tests {
             "2026/01/31",
             "abc",
         ] {
-            let err = parse_due(bad).unwrap_err();
+            let err = parse_datetime(bad).unwrap_err();
             assert!(err.contains("2026-01-31"), "非法输入 {bad:?} 的提示: {err}");
         }
     }
 
     #[test]
-    fn parse_due_roundtrips_through_utc() {
-        let due = parse_due("2026-01-31 18:30").unwrap().unwrap();
+    fn parse_datetime_roundtrips_through_utc() {
+        let due = parse_datetime("2026-01-31 18:30").unwrap().unwrap();
         // UTC 存储与本地时刻一致：本地转回后仍为 18:30
         let back = due.with_timezone(&Local);
         assert_eq!(
@@ -513,11 +564,11 @@ mod tests {
 
     #[test]
     fn format_due_roundtrips_through_parse() {
-        let due = parse_due("2026-01-31 18:30").unwrap().unwrap();
+        let due = parse_datetime("2026-01-31 18:30").unwrap().unwrap();
         let text = format_due(due);
         assert_eq!(text, "2026-01-31 18:30");
-        // 回填文本必须可被 parse_due 解析且还原同一时刻（闭环校验）
-        assert_eq!(parse_due(&text).unwrap().unwrap(), due);
+        // 回填文本必须可被 parse_datetime 解析且还原同一时刻（闭环校验）
+        assert_eq!(parse_datetime(&text).unwrap().unwrap(), due);
     }
 
     #[test]
@@ -561,14 +612,17 @@ mod tests {
             )
         );
         // 回填文本必须能被解析函数接受（闭环校验）
-        assert!(parse_due(&text).unwrap().is_some());
+        assert!(parse_datetime(&text).unwrap().is_some());
     }
 
     #[test]
     fn quick_due_text_is_parseable() {
         for quick in [QuickDue::Today, QuickDue::Tomorrow, QuickDue::Sunday] {
             let text = quick.due_text(dt(1_700_000_000));
-            assert!(parse_due(&text).is_ok(), "{text} 应可被 parse_due 接受");
+            assert!(
+                parse_datetime(&text).is_ok(),
+                "{text} 应可被 parse_datetime 接受"
+            );
         }
     }
 
@@ -586,5 +640,44 @@ mod tests {
         let a = Project::new("a".into(), dt(1));
         let b = Project::new("b".into(), dt(2));
         assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn new_project_has_no_times() {
+        let project = Project::new("工作".into(), dt(1_700_000_000));
+        assert_eq!(project.started_at, None);
+        assert_eq!(project.finished_at, None);
+    }
+
+    #[test]
+    fn new_full_project_sets_times() {
+        let now = dt(1_700_000_000);
+        let start = dt(1_700_000_000);
+        let finish = dt(1_700_100_000);
+        let project = Project::new_full("项目 A".into(), Some(start), Some(finish), now);
+
+        assert_eq!(project.name, "项目 A");
+        assert_eq!(project.started_at, Some(start));
+        assert_eq!(project.finished_at, Some(finish));
+        assert_eq!(project.created_at, now);
+
+        // 起止时间均可缺省
+        let plain = Project::new_full("项目 B".into(), None, None, now);
+        assert_eq!(plain.started_at, None);
+        assert_eq!(plain.finished_at, None);
+    }
+
+    #[test]
+    fn legacy_project_json_without_times_defaults_to_none() {
+        // 旧版数据：没有 started_at / finished_at 字段，反序列化应自动落空
+        let json = r#"{
+            "id": "0195c7e0-0000-7000-8000-000000000001",
+            "name": "旧项目",
+            "created_at": "2026-01-01T10:00:00Z"
+        }"#;
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(project.name, "旧项目");
+        assert_eq!(project.started_at, None);
+        assert_eq!(project.finished_at, None);
     }
 }

@@ -38,7 +38,7 @@ fn boot() -> (App, Task<Message>) {
 }
 
 /// 每秒产生一个时钟消息，驱动"进行中"任务的实时耗时显示；
-/// 弹窗添加任务打开时，额外监听 Esc 键关闭弹窗。
+/// 任一弹窗（任务 / 项目添加）打开时，额外监听 Esc 键关闭对应弹窗。
 fn subscription(app: &App) -> Subscription<Message> {
     let clock = Subscription::run(|| {
         iced::stream::channel(
@@ -57,13 +57,14 @@ fn subscription(app: &App) -> Subscription<Message> {
     })
     .map(Message::Tick);
 
-    if app.add_dialog.is_some() {
-        // 弹窗打开时：Esc 关闭弹窗（与点击遮罩 / 取消按钮等效）
+    // 任一弹窗打开时：Esc 关闭当前弹窗（与点击遮罩等效）
+    // 注意：listen_with 只接受无捕获的 fn 指针，因此固定发出 CloseActiveDialog
+    if app.add_dialog.is_some() || app.project_dialog.is_some() {
         let esc = iced::event::listen_with(|event, _status, _window| {
             if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event
                 && key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
             {
-                Some(Message::CloseAddDialog)
+                Some(Message::CloseActiveDialog)
             } else {
                 None
             }

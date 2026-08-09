@@ -111,7 +111,12 @@ mod tests {
     #[tokio::test]
     async fn save_then_load_roundtrip() {
         let path = temp_path("roundtrip.json");
-        let project = Project::new("工作".into(), Utc::now());
+        let project = Project::new_full(
+            "工作".into(),
+            Some(Utc::now()),
+            Some(Utc::now() + chrono::Duration::days(30)),
+            Utc::now(),
+        );
         let mut todos = sample_todos();
         todos[0].project_id = Some(project.id);
         let store = Store {
@@ -138,6 +143,33 @@ mod tests {
         assert_eq!(loaded.projects.len(), 1);
         assert_eq!(loaded.projects[0].name, "工作");
         assert_eq!(loaded.projects[0].id, store.projects[0].id);
+        assert_eq!(loaded.projects[0].started_at, store.projects[0].started_at); // 起止时间往返保留
+        assert_eq!(
+            loaded.projects[0].finished_at,
+            store.projects[0].finished_at
+        );
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_store_projects_without_times_load() {
+        // 旧版 Store：项目无 started_at / finished_at 字段，自动落空
+        let path = temp_path("legacy-project.json");
+        let json = r#"{
+            "todos": [],
+            "projects": [
+                { "id": "0195c7e0-0000-7000-8000-000000000001", "name": "旧项目", "created_at": "2026-01-01T10:00:00Z" }
+            ]
+        }"#;
+        save_to(path.clone(), json.into()).await.unwrap();
+
+        let loaded = load_from(path.clone()).await.unwrap();
+
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].name, "旧项目");
+        assert_eq!(loaded.projects[0].started_at, None); // 缺省字段安全落空
+        assert_eq!(loaded.projects[0].finished_at, None);
 
         let _ = tokio::fs::remove_file(&path).await;
     }

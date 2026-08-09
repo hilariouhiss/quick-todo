@@ -9,10 +9,11 @@ use iced::Task;
 use uuid::Uuid;
 
 use crate::model::{
-    AddDialog, App, Project, QuickDue, Todo, TodoEdit, TodoStatus, format_due, parse_due,
+    AddDialog, App, Project, ProjectDialog, QuickDue, Todo, TodoEdit, TodoStatus, format_due,
+    parse_datetime,
 };
 use crate::storage::{self, Store};
-use crate::view::DIALOG_TITLE_ID;
+use crate::view::{DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID};
 
 /// 应用内所有可触发的消息。
 #[derive(Debug, Clone)]
@@ -33,10 +34,18 @@ pub enum Message {
     Saved(Result<(), String>),
     /// 每秒时钟（携带当前 UTC 时间，用于实时耗时显示）
     Tick(DateTime<Utc>),
-    /// 新建项目输入框内容变化
-    ProjectInputChanged(String),
-    /// 添加项目（回车或点击"添加"）
-    AddProject,
+    /// 打开弹窗添加项目（名称 + 可选起止时间）
+    OpenProjectDialog,
+    /// 关闭弹窗添加项目（丢弃已填内容，不落盘）
+    CloseProjectDialog,
+    /// 弹窗：名称输入框变化
+    ProjectNameChanged(String),
+    /// 弹窗：开始时间输入框变化（实时解析校验）
+    ProjectStartChanged(String),
+    /// 弹窗：结束时间输入框变化（实时解析校验）
+    ProjectEndChanged(String),
+    /// 弹窗：点击"创建"/回车（校验通过后创建项目并落盘）
+    SubmitProjectDialog,
     /// 开始重命名项目：进入编辑态并预填当前名称
     StartRenameProject(Uuid),
     /// 重命名输入框内容变化
@@ -71,6 +80,8 @@ pub enum Message {
     OpenAddDialog,
     /// 关闭弹窗添加任务（丢弃已填内容，不落盘）
     CloseAddDialog,
+    /// 关闭当前打开的弹窗（任务或项目；点击遮罩 / Esc 触发）
+    CloseActiveDialog,
     /// 弹窗：标题输入框变化
     DialogTitleChanged(String),
     /// 弹窗：描述输入框变化
@@ -137,15 +148,84 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::Saved(Err(error)) => app.error = Some(format!("保存数据失败: {error}")),
         Message::Tick(now) => app.now = now,
 
-        Message::ProjectInputChanged(text) => app.project_input = text,
+        Message::OpenProjectDialog => {
+            // 弹窗互斥：打开项目弹窗时关闭任务弹窗
+            app.add_dialog = None;
+            app.project_dialog = Some(ProjectDialog::default());
+            // 聚焦弹窗名称输入框（下一次渲染生效）
+            return iced::widget::operation::focus(PROJECT_DIALOG_NAME_ID);
+        }
 
-        Message::AddProject => {
-            let name = app.project_input.trim().to_owned();
-            if !name.is_empty() && !app.projects.iter().any(|p| p.name == name) {
-                app.projects.push(Project::new(name, app.now));
-                app.project_input.clear();
-                return persist(app);
+        Message::CloseProjectDialog => {
+            // 关闭弹窗：丢弃已填内容（弹窗表单是纯内存状态，不落盘）
+            app.project_dialog = None;
+        }
+
+        Message::ProjectNameChanged(text) => {
+            if let Some(dialog) = &mut app.project_dialog {
+                dialog.name = text;
             }
+        }
+
+        Message::ProjectStartChanged(text) => {
+            if let Some(dialog) = &mut app.project_dialog {
+                // 实时解析：非法格式立即提示（start_parsed 缓存结果）
+                dialog.start_parsed = parse_datetime(&text);
+                dialog.start_input = text;
+            }
+        }
+
+        Message::ProjectEndChanged(text) => {
+            if let Some(dialog) = &mut app.project_dialog {
+                // 实时解析：非法格式立即提示（end_parsed 缓存结果）
+                dialog.end_parsed = parse_datetime(&text);
+                dialog.end_input = text;
+            }
+        }
+
+        Message::SubmitProjectDialog => {
+            // 校验不通过时恢复弹窗（保留用户输入），不产生任何副作用
+            let Some(dialog) = app.project_dialog.take() else {
+                return Task::none();
+            };
+            let restore = |app: &mut App| app.project_dialog = Some(dialog.clone());
+
+            let name = dialog.name.trim().to_owned();
+            if name.is_empty() || app.projects.iter().any(|p| p.name == name) {
+                restore(app);
+                return Task::none();
+            }
+            let started_at = match dialog.start_parsed {
+                Ok(time) => time,
+                Err(_) => {
+                    restore(app);
+                    return Task::none();
+                }
+            };
+            let finished_at = match dialog.end_parsed {
+                Ok(time) => time,
+                Err(_) => {
+                    restore(app);
+                    return Task::none();
+                }
+            };
+            // 起止时间同时设置时必须满足：开始早于结束
+            if let (Some(start), Some(finish)) = (started_at, finished_at)
+                && start >= finish
+            {
+                restore(app);
+                return Task::none();
+            }
+
+            // 校验通过：创建项目（含起止时间、时间取自 app.now）并关闭弹窗
+            let project = if started_at.is_none() && finished_at.is_none() {
+                Project::new(name, app.now)
+            } else {
+                Project::new_full(name, started_at, finished_at, app.now)
+            };
+            app.projects.push(project);
+            app.project_dialog = None;
+            return persist(app);
         }
 
         Message::StartRenameProject(id) => {
@@ -209,6 +289,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::ToggleSidebar => app.sidebar_visible = !app.sidebar_visible,
 
         Message::OpenAddDialog => {
+            // 弹窗互斥：打开任务弹窗时关闭项目弹窗
+            app.project_dialog = None;
             // 弹窗打开：处于项目筛选时预选该项目，作为默认归属
             app.add_dialog = Some(AddDialog {
                 project_id: app.selected_project,
@@ -221,6 +303,15 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::CloseAddDialog => {
             // 关闭弹窗：丢弃已填内容（弹窗表单是纯内存状态，不落盘）
             app.add_dialog = None;
+        }
+
+        Message::CloseActiveDialog => {
+            // 弹窗互斥，当前只可能打开一个：关闭打开的那个
+            if app.add_dialog.is_some() {
+                app.add_dialog = None;
+            } else {
+                app.project_dialog = None;
+            }
         }
 
         Message::DialogTitleChanged(text) => {
@@ -248,7 +339,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::DialogDueChanged(text) => {
             if let Some(dialog) = &mut app.add_dialog {
                 // 实时解析：非法格式立即提示（due_parsed 缓存结果）
-                dialog.due_parsed = parse_due(&text);
+                dialog.due_parsed = parse_datetime(&text);
                 dialog.due_input = text;
             }
         }
@@ -257,7 +348,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             if let Some(dialog) = &mut app.add_dialog {
                 // 快捷时间：基于 app.now 的本地时区计算，回填文本后走统一解析
                 let text = quick.due_text(app.now);
-                dialog.due_parsed = parse_due(&text);
+                dialog.due_parsed = parse_datetime(&text);
                 dialog.due_input = text;
             }
         }
@@ -343,7 +434,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::EditDueChanged(text) => {
             if let Some(edit) = &mut app.todo_edit {
                 // 实时解析：非法格式立即提示（due_parsed 缓存结果）
-                edit.due_parsed = parse_due(&text);
+                edit.due_parsed = parse_datetime(&text);
                 edit.due_input = text;
             }
         }
@@ -352,7 +443,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             if let Some(edit) = &mut app.todo_edit {
                 // 快捷时间：基于 app.now 的本地时区计算，回填文本后走统一解析
                 let text = quick.due_text(app.now);
-                edit.due_parsed = parse_due(&text);
+                edit.due_parsed = parse_datetime(&text);
                 edit.due_input = text;
             }
         }
@@ -431,9 +522,9 @@ mod tests {
         let _ = update(app, Message::AddTodo);
         app.todos[0].id
     }
+    /// 直接构造项目（弹窗创建路径由 submit_project_dialog 系列测试覆盖）
     fn add_project(app: &mut App, name: &str) -> Uuid {
-        app.project_input = name.into();
-        let _ = update(app, Message::AddProject);
+        app.projects.push(Project::new(name.into(), app.now));
         app.projects.last().unwrap().id
     }
 
@@ -527,40 +618,194 @@ mod tests {
 
     // ---------- 项目 ----------
 
+    // ---------- 弹窗添加项目 ----------
+
     #[test]
-    fn add_project_trims_and_clears_input() {
-        let mut app = app_with(Utc::now());
-        app.project_input = "  工作  ".into();
+    fn open_project_dialog_initializes_form() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenProjectDialog);
 
-        let _ = update(&mut app, Message::AddProject);
+        let dialog = app.project_dialog.as_ref().unwrap();
+        assert!(dialog.name.is_empty());
+        assert!(dialog.start_parsed.is_ok());
+        assert!(dialog.end_parsed.is_ok());
+    }
 
+    #[test]
+    fn project_dialogs_are_mutually_exclusive() {
+        let mut app = App::default();
+        // 打开任务弹窗后打开项目弹窗：任务弹窗被关闭
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        assert!(app.project_dialog.is_some());
+        assert!(app.add_dialog.is_none());
+
+        // 再打开任务弹窗：项目弹窗被关闭
+        let _ = update(&mut app, Message::OpenAddDialog);
+        assert!(app.add_dialog.is_some());
+        assert!(app.project_dialog.is_none());
+    }
+
+    #[test]
+    fn close_project_dialog_discards_input() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        let _ = update(&mut app, Message::ProjectNameChanged("工作".into()));
+
+        let _ = update(&mut app, Message::CloseProjectDialog);
+
+        assert!(app.project_dialog.is_none());
+        assert!(app.projects.is_empty()); // 未创建任何项目
+    }
+
+    #[test]
+    fn close_active_dialog_closes_whichever_open() {
+        let mut app = App::default();
+
+        // 任务弹窗打开时关闭任务弹窗
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::CloseActiveDialog);
+        assert!(app.add_dialog.is_none());
+
+        // 项目弹窗打开时关闭项目弹窗
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        let _ = update(&mut app, Message::CloseActiveDialog);
+        assert!(app.project_dialog.is_none());
+
+        // 无弹窗打开时无副作用
+        let _ = update(&mut app, Message::CloseActiveDialog);
+        assert!(app.add_dialog.is_none());
+        assert!(app.project_dialog.is_none());
+    }
+
+    #[test]
+    fn project_dialog_inputs_update_form() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenProjectDialog);
+
+        let _ = update(&mut app, Message::ProjectNameChanged("工作".into()));
+        let _ = update(&mut app, Message::ProjectStartChanged("2026-01-01".into()));
+        let _ = update(
+            &mut app,
+            Message::ProjectEndChanged("2026-01-31 18:30".into()),
+        );
+
+        let dialog = app.project_dialog.as_ref().unwrap();
+        assert_eq!(dialog.name, "工作");
+        assert!(dialog.start_parsed.as_ref().unwrap().is_some());
+        assert!(dialog.end_parsed.as_ref().unwrap().is_some());
+    }
+
+    #[test]
+    fn project_dialog_inputs_ignored_when_closed() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::ProjectNameChanged("工作".into()));
+        let _ = update(&mut app, Message::ProjectStartChanged("2026-01-01".into()));
+        assert!(app.project_dialog.is_none());
+    }
+
+    #[test]
+    fn submit_project_dialog_creates_project_with_times() {
+        let now = Utc::now();
+        let mut app = app_with(now);
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        let _ = update(&mut app, Message::ProjectNameChanged("  工作  ".into()));
+        let _ = update(&mut app, Message::ProjectStartChanged("2026-01-01".into()));
+        let _ = update(
+            &mut app,
+            Message::ProjectEndChanged("2026-01-31 18:30".into()),
+        );
+
+        let _ = update(&mut app, Message::SubmitProjectDialog);
+
+        assert!(app.project_dialog.is_none()); // 弹窗关闭
         assert_eq!(app.projects.len(), 1);
-        assert_eq!(app.projects[0].name, "工作"); // 自动去除首尾空白
-        assert!(app.project_input.is_empty());
+        let project = &app.projects[0];
+        assert_eq!(project.name, "工作"); // trim 后存储
+        assert!(project.started_at.is_some());
+        assert!(project.finished_at.is_some());
+        assert_eq!(project.created_at, now); // 时间取自 app.now
     }
 
     #[test]
-    fn blank_project_name_is_ignored() {
-        let mut app = App {
-            project_input: "   ".into(),
-            ..App::default()
-        };
+    fn submit_project_dialog_without_times_creates_project() {
+        let now = Utc::now();
+        let mut app = app_with(now);
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        let _ = update(&mut app, Message::ProjectNameChanged("无时间项目".into()));
 
-        let _ = update(&mut app, Message::AddProject);
+        let _ = update(&mut app, Message::SubmitProjectDialog);
 
+        assert!(app.project_dialog.is_none());
+        assert_eq!(app.projects[0].started_at, None);
+        assert_eq!(app.projects[0].finished_at, None);
+    }
+
+    #[test]
+    fn submit_project_dialog_blank_name_keeps_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        let _ = update(&mut app, Message::ProjectNameChanged("   ".into()));
+
+        let _ = update(&mut app, Message::SubmitProjectDialog);
+
+        assert!(app.project_dialog.is_some()); // 弹窗保持打开
+        assert_eq!(app.project_dialog.as_ref().unwrap().name, "   "); // 输入保留
         assert!(app.projects.is_empty());
-        assert!(!app.project_input.is_empty()); // 输入保留，便于修改
     }
 
     #[test]
-    fn duplicate_project_name_is_ignored() {
+    fn submit_project_dialog_duplicate_name_keeps_dialog() {
         let mut app = App::default();
         add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        let _ = update(&mut app, Message::ProjectNameChanged("工作".into()));
 
-        app.project_input = "工作".into();
-        let _ = update(&mut app, Message::AddProject);
+        let _ = update(&mut app, Message::SubmitProjectDialog);
 
-        assert_eq!(app.projects.len(), 1);
+        assert!(app.project_dialog.is_some());
+        assert_eq!(app.projects.len(), 1); // 未重复创建
+    }
+
+    #[test]
+    fn submit_project_dialog_invalid_time_keeps_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        let _ = update(&mut app, Message::ProjectNameChanged("工作".into()));
+        let _ = update(&mut app, Message::ProjectStartChanged("后天".into()));
+
+        let _ = update(&mut app, Message::SubmitProjectDialog);
+
+        assert!(app.project_dialog.is_some()); // 开始时间格式非法 → 拒绝
+        assert!(app.projects.is_empty());
+
+        // 结束时间格式非法同样拒绝
+        let _ = update(&mut app, Message::ProjectStartChanged("".into()));
+        let _ = update(&mut app, Message::ProjectEndChanged("2026/01/31".into()));
+        let _ = update(&mut app, Message::SubmitProjectDialog);
+        assert!(app.project_dialog.is_some());
+        assert!(app.projects.is_empty());
+    }
+
+    #[test]
+    fn submit_project_dialog_start_after_end_keeps_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        let _ = update(&mut app, Message::ProjectNameChanged("工作".into()));
+        let _ = update(&mut app, Message::ProjectStartChanged("2026-02-01".into()));
+        let _ = update(&mut app, Message::ProjectEndChanged("2026-01-31".into()));
+
+        let _ = update(&mut app, Message::SubmitProjectDialog);
+
+        assert!(app.project_dialog.is_some()); // 开始不早于结束 → 拒绝
+        assert!(app.projects.is_empty());
+    }
+
+    #[test]
+    fn submit_without_open_project_dialog_is_noop() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::SubmitProjectDialog);
+        assert!(app.projects.is_empty());
     }
 
     #[test]

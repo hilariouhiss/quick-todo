@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use iced::Task;
 use uuid::Uuid;
 
-use crate::model::{App, Todo, TodoStatus};
-use crate::storage;
+use crate::model::{App, Project, Todo, TodoStatus};
+use crate::storage::{self, Store};
 
 /// 应用内所有可触发的消息。
 #[derive(Debug, Clone)]
@@ -25,11 +25,32 @@ pub enum Message {
     /// 删除任务
     DeleteTodo(Uuid),
     /// 启动时异步加载完成
-    Loaded(Result<Vec<Todo>, String>),
+    Loaded(Result<Store, String>),
     /// 一次异步保存完成
     Saved(Result<(), String>),
     /// 每秒时钟（携带当前 UTC 时间，用于实时耗时显示）
     Tick(DateTime<Utc>),
+    /// 新建项目输入框内容变化
+    ProjectInputChanged(String),
+    /// 添加项目（回车或点击"添加"）
+    AddProject,
+    /// 开始重命名项目：进入编辑态并预填当前名称
+    StartRenameProject(Uuid),
+    /// 重命名输入框内容变化
+    ProjectRenameChanged(String),
+    /// 保存重命名（校验通过后提交并退出编辑态）
+    SaveRenameProject,
+    /// 取消重命名：退出编辑态
+    CancelRenameProject,
+    /// 删除项目（其下任务自动解除归属）
+    DeleteProject(Uuid),
+    /// 选中项目筛选（`None` = 全部）
+    SelectProject(Option<Uuid>),
+    /// 设置任务的归属项目（`None` = 解除归属）
+    AssignProject {
+        todo_id: Uuid,
+        project_id: Option<Uuid>,
+    },
 }
 
 /// 处理消息，更新应用状态；必要时返回副作用任务（异步落盘）。
@@ -43,7 +64,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // 创建时立即记录创建时间
                 app.todos.insert(0, Todo::new(title, app.now));
                 app.input.clear();
-                return persist(&app.todos);
+                return persist(app);
             }
         }
 
@@ -52,7 +73,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // 只有"未开始"的任务可以开始
                 if todo.status() == TodoStatus::Pending {
                     todo.started_at = Some(app.now);
-                    return persist(&app.todos);
+                    return persist(app);
                 }
             }
         }
@@ -62,7 +83,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // 只有"进行中"的任务可以完成
                 if todo.status() == TodoStatus::InProgress {
                     todo.finished_at = Some(app.now);
-                    return persist(&app.todos);
+                    return persist(app);
                 }
             }
         }
@@ -71,26 +92,118 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let before = app.todos.len();
             app.todos.retain(|todo| todo.id != id);
             if app.todos.len() != before {
-                return persist(&app.todos);
+                return persist(app);
             }
         }
 
-        Message::Loaded(Ok(todos)) => app.todos = todos,
+        Message::Loaded(Ok(store)) => {
+            app.todos = store.todos;
+            app.projects = store.projects;
+        }
         Message::Loaded(Err(error)) => app.error = Some(format!("加载数据失败: {error}")),
         Message::Saved(Ok(())) => {}
         Message::Saved(Err(error)) => app.error = Some(format!("保存数据失败: {error}")),
         Message::Tick(now) => app.now = now,
+
+        Message::ProjectInputChanged(text) => app.project_input = text,
+
+        Message::AddProject => {
+            let name = app.project_input.trim().to_owned();
+            if !name.is_empty() && !app.projects.iter().any(|p| p.name == name) {
+                app.projects.push(Project::new(name, app.now));
+                app.project_input.clear();
+                return persist(app);
+            }
+        }
+
+        Message::StartRenameProject(id) => {
+            if let Some(project) = app.projects.iter().find(|p| p.id == id) {
+                app.editing_project = Some(id);
+                app.project_edit_input = project.name.clone();
+            }
+        }
+
+        Message::ProjectRenameChanged(text) => app.project_edit_input = text,
+
+        Message::SaveRenameProject => {
+            let Some(id) = app.editing_project else {
+                return Task::none();
+            };
+            let name = app.project_edit_input.trim().to_owned();
+            let valid =
+                !name.is_empty() && !app.projects.iter().any(|p| p.id != id && p.name == name);
+            match app.projects.iter_mut().find(|p| p.id == id) {
+                // 名称非法（空 / 与其他项目重名）：保持编辑态，等待用户修改
+                Some(project) if valid => {
+                    project.name = name;
+                    app.editing_project = None;
+                    return persist(app);
+                }
+                Some(_) => {}
+                // 项目已被删除：退出编辑态
+                None => app.editing_project = None,
+            }
+        }
+
+        Message::CancelRenameProject => {
+            app.editing_project = None;
+            app.project_edit_input.clear();
+        }
+
+        Message::DeleteProject(id) => {
+            let before = app.projects.len();
+            app.projects.retain(|project| project.id != id);
+            if app.projects.len() != before {
+                // 其下任务解除归属（任务本身保留）
+                for todo in app.todos.iter_mut() {
+                    if todo.project_id == Some(id) {
+                        todo.project_id = None;
+                    }
+                }
+                // 若被删项目正被筛选或编辑，同步复位
+                if app.selected_project == Some(id) {
+                    app.selected_project = None;
+                }
+                if app.editing_project == Some(id) {
+                    app.editing_project = None;
+                    app.project_edit_input.clear();
+                }
+                return persist(app);
+            }
+        }
+
+        Message::SelectProject(selection) => app.selected_project = selection,
+
+        Message::AssignProject {
+            todo_id,
+            project_id,
+        } => {
+            // 防御：项目必须存在（已被删除的项目不可再被选中）
+            if !project_id.is_none_or(|id| app.projects.iter().any(|p| p.id == id)) {
+                return Task::none();
+            }
+            if let Some(todo) = app.todos.iter_mut().find(|todo| todo.id == todo_id)
+                && todo.project_id != project_id
+            {
+                todo.project_id = project_id;
+                return persist(app);
+            }
+        }
     }
 
     Task::none()
 }
 
-/// 把当前任务列表序列化并异步写入磁盘（fire-and-forget）。
-fn persist(todos: &[Todo]) -> Task<Message> {
-    match serde_json::to_string_pretty(todos) {
+/// 把当前任务与项目序列化并异步写入磁盘（fire-and-forget）。
+fn persist(app: &App) -> Task<Message> {
+    let store = Store {
+        todos: app.todos.clone(),
+        projects: app.projects.clone(),
+    };
+    match serde_json::to_string_pretty(&store) {
         Ok(json) => Task::perform(storage::save(json), Message::Saved),
         Err(error) => {
-            eprintln!("序列化任务列表失败: {error}");
+            eprintln!("序列化数据失败: {error}");
             Task::none()
         }
     }
@@ -105,6 +218,18 @@ mod tests {
             now,
             ..App::default()
         }
+    }
+
+    fn add_todo(app: &mut App, title: &str) -> Uuid {
+        app.input = title.into();
+        let _ = update(app, Message::AddTodo);
+        app.todos[0].id
+    }
+
+    fn add_project(app: &mut App, name: &str) -> Uuid {
+        app.project_input = name.into();
+        let _ = update(app, Message::AddProject);
+        app.projects.last().unwrap().id
     }
 
     #[test]
@@ -124,8 +249,10 @@ mod tests {
 
     #[test]
     fn blank_title_is_ignored() {
-        let mut app = App::default();
-        app.input = "   ".into();
+        let mut app = App {
+            input: "   ".into(),
+            ..App::default()
+        };
 
         let _ = update(&mut app, Message::AddTodo);
 
@@ -147,9 +274,7 @@ mod tests {
     fn start_then_finish_records_times_in_order() {
         let now = Utc::now();
         let mut app = app_with(now);
-        app.input = "写代码".into();
-        let _ = update(&mut app, Message::AddTodo);
-        let id = app.todos[0].id;
+        let id = add_todo(&mut app, "写代码");
 
         // 未开始的任务不能直接"完成"
         let _ = update(&mut app, Message::FinishTodo(id));
@@ -185,15 +310,200 @@ mod tests {
     #[test]
     fn delete_removes_todo() {
         let mut app = app_with(Utc::now());
-        app.input = "任务 A".into();
-        let _ = update(&mut app, Message::AddTodo);
-        app.input = "任务 B".into();
-        let _ = update(&mut app, Message::AddTodo);
-        let id = app.todos[0].id;
+        add_todo(&mut app, "任务 A");
+        let id = add_todo(&mut app, "任务 B");
 
         let _ = update(&mut app, Message::DeleteTodo(id));
 
         assert_eq!(app.todos.len(), 1);
         assert!(!app.todos.iter().any(|todo| todo.id == id));
+    }
+
+    // ---------- 项目 ----------
+
+    #[test]
+    fn add_project_trims_and_clears_input() {
+        let mut app = app_with(Utc::now());
+        app.project_input = "  工作  ".into();
+
+        let _ = update(&mut app, Message::AddProject);
+
+        assert_eq!(app.projects.len(), 1);
+        assert_eq!(app.projects[0].name, "工作"); // 自动去除首尾空白
+        assert!(app.project_input.is_empty());
+    }
+
+    #[test]
+    fn blank_project_name_is_ignored() {
+        let mut app = App {
+            project_input: "   ".into(),
+            ..App::default()
+        };
+
+        let _ = update(&mut app, Message::AddProject);
+
+        assert!(app.projects.is_empty());
+        assert!(!app.project_input.is_empty()); // 输入保留，便于修改
+    }
+
+    #[test]
+    fn duplicate_project_name_is_ignored() {
+        let mut app = App::default();
+        add_project(&mut app, "工作");
+
+        app.project_input = "工作".into();
+        let _ = update(&mut app, Message::AddProject);
+
+        assert_eq!(app.projects.len(), 1);
+    }
+
+    #[test]
+    fn rename_project_prefills_and_commits() {
+        let mut app = App::default();
+        let id = add_project(&mut app, "工作");
+
+        let _ = update(&mut app, Message::StartRenameProject(id));
+        assert_eq!(app.editing_project, Some(id));
+        assert_eq!(app.project_edit_input, "工作"); // 预填当前名称
+
+        app.project_edit_input = " 个人  ".into();
+        let _ = update(&mut app, Message::SaveRenameProject);
+
+        assert_eq!(app.projects[0].name, "个人"); // trim 后提交
+        assert_eq!(app.editing_project, None);
+    }
+
+    #[test]
+    fn rename_to_blank_or_duplicate_keeps_editing() {
+        let mut app = App::default();
+        let id = add_project(&mut app, "工作");
+        add_project(&mut app, "生活");
+
+        // 空名称
+        let _ = update(&mut app, Message::StartRenameProject(id));
+        app.project_edit_input = "   ".into();
+        let _ = update(&mut app, Message::SaveRenameProject);
+        assert_eq!(app.projects[0].name, "工作");
+        assert_eq!(app.editing_project, Some(id)); // 保持编辑态
+
+        // 与其他项目重名
+        app.project_edit_input = "生活".into();
+        let _ = update(&mut app, Message::SaveRenameProject);
+        assert_eq!(app.projects[0].name, "工作");
+        assert_eq!(app.editing_project, Some(id)); // 保持编辑态
+    }
+
+    #[test]
+    fn cancel_rename_exits_editing() {
+        let mut app = App::default();
+        let id = add_project(&mut app, "工作");
+
+        let _ = update(&mut app, Message::StartRenameProject(id));
+        app.project_edit_input = "改到一半".into();
+        let _ = update(&mut app, Message::CancelRenameProject);
+
+        assert_eq!(app.editing_project, None);
+        assert!(app.project_edit_input.is_empty());
+        assert_eq!(app.projects[0].name, "工作"); // 名称未变
+    }
+
+    #[test]
+    fn delete_project_unassigns_todos_and_resets_selection() {
+        let mut app = App::default();
+        let pid = add_project(&mut app, "工作");
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(
+            &mut app,
+            Message::AssignProject {
+                todo_id,
+                project_id: Some(pid),
+            },
+        );
+        let _ = update(&mut app, Message::SelectProject(Some(pid)));
+        let _ = update(&mut app, Message::StartRenameProject(pid));
+        assert_eq!(app.todos[0].project_id, Some(pid));
+
+        let _ = update(&mut app, Message::DeleteProject(pid));
+
+        assert!(app.projects.is_empty());
+        assert_eq!(app.todos[0].project_id, None); // 任务保留，归属解除
+        assert_eq!(app.selected_project, None); // 筛选复位
+        assert_eq!(app.editing_project, None); // 编辑态复位
+    }
+
+    #[test]
+    fn assign_project_sets_and_clears() {
+        let mut app = App::default();
+        let pid = add_project(&mut app, "工作");
+        let todo_id = add_todo(&mut app, "写方案");
+
+        // 归属
+        let _ = update(
+            &mut app,
+            Message::AssignProject {
+                todo_id,
+                project_id: Some(pid),
+            },
+        );
+        assert_eq!(app.todos[0].project_id, Some(pid));
+
+        // 解除归属
+        let _ = update(
+            &mut app,
+            Message::AssignProject {
+                todo_id,
+                project_id: None,
+            },
+        );
+        assert_eq!(app.todos[0].project_id, None);
+    }
+
+    #[test]
+    fn assign_unknown_project_is_rejected() {
+        let mut app = App::default();
+        let todo_id = add_todo(&mut app, "写方案");
+
+        let _ = update(
+            &mut app,
+            Message::AssignProject {
+                todo_id,
+                project_id: Some(Uuid::now_v7()),
+            },
+        );
+
+        assert_eq!(app.todos[0].project_id, None);
+    }
+
+    #[test]
+    fn select_project_is_pure_state() {
+        let mut app = App::default();
+        let pid = add_project(&mut app, "工作");
+
+        let _ = update(&mut app, Message::SelectProject(Some(pid)));
+        assert_eq!(app.selected_project, Some(pid));
+
+        let _ = update(&mut app, Message::SelectProject(None));
+        assert_eq!(app.selected_project, None);
+    }
+
+    #[test]
+    fn loaded_populates_todos_and_projects() {
+        let mut app = App::default();
+        let store = Store {
+            todos: vec![Todo::new("任务".into(), Utc::now())],
+            projects: vec![Project::new("工作".into(), Utc::now())],
+        };
+
+        let _ = update(&mut app, Message::Loaded(Ok(store)));
+
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.projects.len(), 1);
+    }
+
+    #[test]
+    fn loaded_error_sets_hint() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::Loaded(Err("磁盘错误".into())));
+        assert!(app.error.is_some());
     }
 }

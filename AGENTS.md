@@ -44,12 +44,12 @@ cargo fmt          # 代码格式化
 ```
 src/
 ├── main.rs     入口：iced::application 装配（boot / update / view / subscription）
-├── model.rs    数据模型：Todo、TodoStatus、App（纯数据，无 IO）
+├── model.rs    数据模型：Todo、Project、TodoStatus、App（纯数据，无 IO）
 ├── update.rs   Message 枚举 + update 纯函数（状态流转、副作用派发）
-├── view.rs     视图：把 App 渲染成元素树（输入行、任务卡片、时间元信息）
-├── storage.rs  持久化：异步 JSON 读写（load / save）
+├── view.rs     视图：项目侧边栏 + 任务区（输入行、任务卡片、时间元信息）
+├── storage.rs  持久化：异步 JSON 读写（Store = 任务 + 项目，兼容旧格式）
 docs/
-└── 方案.md     设计文档 —— 需求 R1-R7、架构图、验收标准，改行为前必读
+└── 方案.md     设计文档 —— 需求 R1-R10、架构图、验收标准，改行为前必读
 ```
 
 数据流（Elm 架构）：**视图产生 Message → update 更新状态 → 视图重新渲染**；
@@ -62,16 +62,18 @@ docs/
 1. **状态由时间字段推导，不存储状态枚举。** `Todo` 只有 `created_at / started_at / finished_at` 三个时间字段，`TodoStatus`（Pending / InProgress / Done）由 `status()` 推导。时间字段是唯一事实来源——**严禁**为 `Todo` 增加持久化的状态字段，否则会破坏"状态与时间不可能不一致"的结构保证。
 2. **update 是纯函数。** 所有时间戳一律取自 `app.now`（由每秒 `Tick` 消息刷新），**不要**在 update 里直接调用 `Utc::now()`。副作用只通过返回的 `Task` 表达。
 3. **时间统一 UTC 存储**（`DateTime<Utc>`），仅在 view 层用 `chrono::Local` 格式化展示。
-4. **持久化 fire-and-forget**：每次状态变更后把整个列表 `serde_json::to_string_pretty` 序列化，经 `Task::perform(storage::save, Message::Saved)` 异步写盘；`Saved` 成功消息静默，失败写入 `app.error`。不引入增量同步。
-5. **新任务插在最前**（`todos.insert(0, ...)`）；输入自动 `trim()`，空白标题静默忽略且保留输入框内容。
-6. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。
-7. **错误不崩溃**：数据文件缺失视为空列表；损坏 JSON 返回错误并显示在 UI（`app.error`），绝不 panic。
-8. **UI 文案与代码注释使用中文**；模块级 `//!` + 公开项 `///` 文档注释是标配。
+4. **持久化 fire-and-forget**：每次状态变更后把整个 `Store`（todos + projects）`serde_json::to_string_pretty` 序列化，经 `Task::perform(storage::save, Message::Saved)` 异步写盘；`Saved` 成功消息静默，失败写入 `app.error`。不引入增量同步。
+5. **数据向后兼容**：`Todo.project_id` 带 `#[serde(default)]`；`storage::load` 对旧版纯数组格式自动迁移为 `Store`，不得破坏旧数据。
+6. **项目语义**：项目名 trim 后非空且不重名；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
+7. **新任务插在最前**（`todos.insert(0, ...)`）；输入自动 `trim()`，空白标题静默忽略且保留输入框内容。
+8. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。
+9. **错误不崩溃**：数据文件缺失视为空数据；损坏 JSON 返回错误并显示在 UI（`app.error`），绝不 panic。
+10. **UI 文案与代码注释使用中文**；模块级 `//!` + 公开项 `///` 文档注释是标配。
 
 ## 5. 代码风格
 
 - 模块职责单一：model = 纯数据、update = 纯逻辑、view = 渲染、storage = IO；新增功能先判断归属，不跨层写代码。
-- view 层不持有业务逻辑；派生展示（状态徽章、摘要、耗时格式化）放在 view 内部私有函数。
+- view 层不持有业务逻辑；派生展示（状态徽章、摘要、耗时格式化、项目计数、筛选）放在 view 内部私有函数。
 - 颜色、字体等视觉常量用模块级 `const`，如 `MUTED / ACCENT / DONE`。
 - 新依赖直接在 Cargo.toml 的 `[dependencies]` 中声明（仅原生目标，无 wasm 分块）。
 - 提交前运行 `cargo fmt` 与 `cargo clippy`，保持零警告。
@@ -96,8 +98,8 @@ docs/
 
 ## 8. 开发工作流（Vibe Coding 指引）
 
-1. **先读文档**：涉及行为/数据模型改动时，先读 `docs/方案.md`，设计与文档冲突时先更新文档再改代码。
+1. **先读文档**：涉及行为/数据模型改动时，先读 `docs/方案.md`，设计与文档冲突时先更新文档再改代码；新功能先编写计划文档到 `.pi/plan/` 再实现。
 2. **善用代码索引**：本仓库已配置 CodeGraph（`codegraph_search` / `codegraph_explore` / `codegraph_callers` 等），查符号与调用关系优先用它们，其次才 grep/read。
-3. **小步提交**：仓库当前尚无 commit（git 未初始化历史），功能完成即可做首次提交；提交信息用中文或英文均可，保持风格一致。
+3. **小步提交**：仓库当前尚无 commit（git 未初始化历史），功能完成即可做首次提交；提交信息用中文或英文均可，使用 Conventional Commits 风格。
 4. **变更闭环**：改代码 → 补测试 → `cargo test` → `cargo clippy` → `cargo run` 手动验证 UI 行为。
 5. **验收对照**：功能完成时对照 `docs/方案.md` 第 8 节验收标准逐条核对。

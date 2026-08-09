@@ -1,11 +1,23 @@
-//! 持久化：任务列表以 JSON 文件存放在系统应用数据目录。
+//! 持久化：任务与项目统一以 JSON 文件存放在系统应用数据目录。
 //!
 //! Windows 下默认路径为 `%APPDATA%\iced-todos\todos.json`。
-//! 文件缺失视为空列表；损坏文件返回错误（由 UI 提示，不崩溃）。
+//! 文件缺失视为空数据；损坏文件返回错误（由 UI 提示，不崩溃）。
+//!
+//! 格式演进：旧版本文件为纯任务数组 `Vec<Todo>`，
+//! 新版本为 `Store { todos, projects }`；加载时自动兼容迁移旧格式。
 
 use std::path::PathBuf;
 
-use crate::model::Todo;
+use serde::{Deserialize, Serialize};
+
+use crate::model::{Project, Todo};
+
+/// 持久化数据：任务列表 + 项目列表，单文件存储。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Store {
+    pub todos: Vec<Todo>,
+    pub projects: Vec<Project>,
+}
 
 /// 数据文件路径（若无法确定系统目录，退化为当前目录下的 todos.json）。
 pub fn data_file() -> PathBuf {
@@ -14,23 +26,38 @@ pub fn data_file() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("todos.json"))
 }
 
-/// 从默认数据文件加载任务列表。
-pub async fn load() -> Result<Vec<Todo>, String> {
+/// 从默认数据文件加载任务与项目。
+pub async fn load() -> Result<Store, String> {
     load_from(data_file()).await
 }
 
-/// 把任务列表的 JSON 写入默认数据文件。
+/// 把序列化好的数据 JSON 写入默认数据文件。
 pub async fn save(json: String) -> Result<(), String> {
     save_to(data_file(), json).await
 }
 
 /// 从指定路径加载（供测试复用）。
-pub async fn load_from(path: PathBuf) -> Result<Vec<Todo>, String> {
+pub async fn load_from(path: PathBuf) -> Result<Store, String> {
     match tokio::fs::read_to_string(&path).await {
-        Ok(contents) => serde_json::from_str(&contents)
-            .map_err(|error| format!("解析 {} 失败: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Ok(contents) => {
+            parse(&contents).map_err(|error| format!("解析 {} 失败: {error}", path.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
         Err(error) => Err(format!("读取 {} 失败: {error}", path.display())),
+    }
+}
+
+/// 解析数据文件内容；兼容旧版本纯任务数组格式。
+fn parse(contents: &str) -> Result<Store, String> {
+    match serde_json::from_str::<Store>(contents) {
+        Ok(store) => Ok(store),
+        // 旧版本：文件是纯任务数组（无项目），自动迁移为空项目列表
+        Err(_) => serde_json::from_str::<Vec<Todo>>(contents)
+            .map(|todos| Store {
+                todos,
+                projects: Vec::new(),
+            })
+            .map_err(|error| error.to_string()),
     }
 }
 
@@ -56,13 +83,12 @@ mod tests {
         std::env::temp_dir().join(format!("iced-todos-test-{}-{name}", std::process::id()))
     }
 
-    #[tokio::test]
-    async fn save_then_load_roundtrip() {
-        let path = temp_path("roundtrip.json");
-        let todos = vec![
+    fn sample_todos() -> Vec<Todo> {
+        vec![
             Todo {
                 id: Uuid::now_v7(),
                 title: "读书".into(),
+                project_id: None,
                 created_at: Utc::now(),
                 started_at: None,
                 finished_at: None,
@@ -70,24 +96,66 @@ mod tests {
             Todo {
                 id: Uuid::now_v7(),
                 title: "跑步".into(),
+                project_id: None,
                 created_at: Utc::now(),
                 started_at: Some(Utc::now()),
                 finished_at: Some(Utc::now()),
             },
-        ];
+        ]
+    }
 
-        save_to(path.clone(), serde_json::to_string(&todos).unwrap())
+    #[tokio::test]
+    async fn save_then_load_roundtrip() {
+        let path = temp_path("roundtrip.json");
+        let project = Project::new("工作".into(), Utc::now());
+        let mut todos = sample_todos();
+        todos[0].project_id = Some(project.id);
+        let store = Store {
+            todos,
+            projects: vec![project],
+        };
+
+        save_to(path.clone(), serde_json::to_string_pretty(&store).unwrap())
             .await
             .unwrap();
 
         let loaded = load_from(path.clone()).await.unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].title, "读书");
-        assert_eq!(loaded[0].id, todos[0].id);
-        assert_eq!(loaded[0].created_at, todos[0].created_at);
-        assert_eq!(loaded[1].title, "跑步");
-        assert!(loaded[1].started_at.is_some());
-        assert!(loaded[1].finished_at.is_some());
+        assert_eq!(loaded.todos.len(), 2);
+        assert_eq!(loaded.todos[0].title, "读书");
+        assert_eq!(loaded.todos[0].id, store.todos[0].id);
+        assert_eq!(loaded.todos[0].created_at, store.todos[0].created_at);
+        assert_eq!(loaded.todos[0].project_id, Some(store.projects[0].id));
+        assert_eq!(loaded.todos[1].title, "跑步");
+        assert!(loaded.todos[1].started_at.is_some());
+        assert!(loaded.todos[1].finished_at.is_some());
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].name, "工作");
+        assert_eq!(loaded.projects[0].id, store.projects[0].id);
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_todos_array_migrates() {
+        // 旧版数据文件：纯任务数组（无 project_id / projects 字段）
+        let path = temp_path("legacy.json");
+        let legacy = r#"[
+            {
+                "id": "0195c7e0-0000-7000-8000-000000000001",
+                "title": "旧任务",
+                "created_at": "2026-01-01T10:00:00Z",
+                "started_at": null,
+                "finished_at": null
+            }
+        ]"#;
+        save_to(path.clone(), legacy.into()).await.unwrap();
+
+        let loaded = load_from(path.clone()).await.unwrap();
+
+        assert_eq!(loaded.todos.len(), 1);
+        assert_eq!(loaded.todos[0].title, "旧任务");
+        assert_eq!(loaded.todos[0].project_id, None); // 缺省字段安全落空
+        assert!(loaded.projects.is_empty()); // 迁移后无项目
 
         let _ = tokio::fs::remove_file(&path).await;
     }
@@ -97,7 +165,8 @@ mod tests {
         let path = temp_path("missing.json");
         let _ = tokio::fs::remove_file(&path).await; // 确保不存在
         let loaded = load_from(path).await.unwrap();
-        assert!(loaded.is_empty());
+        assert!(loaded.todos.is_empty());
+        assert!(loaded.projects.is_empty());
     }
 
     #[tokio::test]

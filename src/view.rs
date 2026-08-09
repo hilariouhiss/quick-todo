@@ -29,29 +29,52 @@ const BOLD: Font = Font {
     ..Font::DEFAULT
 };
 
-/// 应用主视图：左侧项目侧边栏 + 右侧任务主区域。
+/// 应用主视图：左侧项目侧边栏（可收放）+ 右侧任务主区域。
 pub fn view(app: &App) -> Element<'_, Message> {
-    let header = row![
-        text("待办清单").size(26).font(BOLD),
-        Space::new().width(Length::Fill),
-        text(summary(app)).size(13).color(MUTED),
-    ]
+    // 标题栏：侧边栏收起时，左侧显示「展开」按钮
+    let header = if app.sidebar_visible {
+        row![
+            text("待办清单").size(26).font(BOLD),
+            Space::new().width(Length::Fill),
+            text(summary(app)).size(13).color(MUTED),
+        ]
+    } else {
+        row![
+            button(text("» 展开").size(14))
+                .on_press(Message::ToggleSidebar)
+                .padding([4, 10]),
+            Space::new().width(8),
+            text("待办清单").size(26).font(BOLD),
+            Space::new().width(Length::Fill),
+            text(summary(app)).size(13).color(MUTED),
+        ]
+    }
     .align_y(Alignment::Center);
 
-    let input_row = row![
-        text_input("输入任务内容，回车或点击“添加”", &app.input)
-            .on_input(Message::InputChanged)
+    // 输入区：标题行 + 描述行（两个输入框回车均可添加）
+    let input_column = column![
+        row![
+            text_input("输入任务内容，回车或点击“添加”", &app.input)
+                .on_input(Message::InputChanged)
+                .on_submit(Message::AddTodo)
+                .padding(10)
+                .width(Length::Fill),
+            Space::new().width(8),
+            button(text("添加").size(15))
+                .on_press(Message::AddTodo)
+                .padding([10, 22]),
+        ]
+        .align_y(Alignment::Center),
+        text_input("任务描述（可选），回车同样可添加", &app.description_input)
+            .on_input(Message::DescriptionInputChanged)
             .on_submit(Message::AddTodo)
-            .padding(10)
-            .width(Length::Fill),
-        Space::new().width(8),
-        button(text("添加").size(15))
-            .on_press(Message::AddTodo)
-            .padding([10, 22]),
+            .padding(10),
     ]
-    .align_y(Alignment::Center);
+    .spacing(8);
 
-    let mut body = column![header, input_row].spacing(12).height(Length::Fill);
+    let mut body = column![header, input_column]
+        .spacing(12)
+        .height(Length::Fill);
 
     if let Some(error) = &app.error {
         body = body.push(text(error.as_str()).size(12).color(ERROR_COLOR));
@@ -74,7 +97,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         todo_list(app, visible)
     });
 
-    container(row![project_sidebar(app), Space::new().width(16), body])
+    // 侧边栏展开时并排显示；收起时任务区占满
+    let content: Element<'_, Message> = if app.sidebar_visible {
+        row![project_sidebar(app), Space::new().width(16), body].into()
+    } else {
+        body.into()
+    };
+
+    container(content)
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(24)
@@ -109,10 +139,17 @@ fn empty_hint(message: &'static str) -> Element<'static, Message> {
 
 // ---------- 项目侧边栏 ----------
 
-/// 左侧项目侧边栏：新建输入行 + 可滚动项目列表（"全部" + 各项目）。
+/// 左侧项目侧边栏：新建输入行 + 可滚动项目列表（"全部" + 各项目），头部可收起。
 fn project_sidebar(app: &App) -> Element<'_, Message> {
     let header = column![
-        text("项目").size(14).font(BOLD),
+        row![
+            text("项目").size(14).font(BOLD),
+            Space::new().width(Length::Fill),
+            button(text("« 收起").size(12))
+                .on_press(Message::ToggleSidebar)
+                .padding([4, 8]),
+        ]
+        .align_y(Alignment::Center),
         row![
             text_input("新建项目…", &app.project_input)
                 .on_input(Message::ProjectInputChanged)
@@ -260,7 +297,7 @@ fn todo_list<'a>(app: &'a App, todos: Vec<&'a Todo>) -> Element<'a, Message> {
     .into()
 }
 
-/// 单个任务的卡片。
+/// 单个任务的卡片：标题 + 可选描述 + 状态徽章 + 操作按钮 + 时间元信息。
 fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     let head = row![
         text(todo.title.as_str()).size(16).font(BOLD),
@@ -274,7 +311,19 @@ fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     .align_y(Alignment::Center)
     .spacing(8);
 
-    container(column![head, meta_rows(todo, app)].spacing(8))
+    // 描述：非空时在标题下方以灰色小字显示（自动换行）
+    let mut content = column![head].spacing(8);
+    if !todo.description.is_empty() {
+        content = content.push(
+            text(todo.description.as_str())
+                .size(13)
+                .color(MUTED)
+                .width(Length::Fill),
+        );
+    }
+    content = content.push(meta_rows(todo, app));
+
+    container(content)
         .width(Length::Fill)
         .padding(12)
         .style(card_style)

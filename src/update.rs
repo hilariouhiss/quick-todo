@@ -16,6 +16,8 @@ use crate::storage::{self, Store};
 pub enum Message {
     /// 输入框内容变化
     InputChanged(String),
+    /// 描述输入框内容变化
+    DescriptionInputChanged(String),
     /// 添加任务（回车或点击"添加"）
     AddTodo,
     /// 开始任务：记录开始时间
@@ -51,19 +53,24 @@ pub enum Message {
         todo_id: Uuid,
         project_id: Option<Uuid>,
     },
+    /// 收起 / 展开项目侧边栏（纯 UI 状态，不触发落盘）
+    ToggleSidebar,
 }
 
 /// 处理消息，更新应用状态；必要时返回副作用任务（异步落盘）。
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::InputChanged(text) => app.input = text,
+        Message::DescriptionInputChanged(text) => app.description_input = text,
 
         Message::AddTodo => {
             let title = app.input.trim().to_owned();
             if !title.is_empty() {
-                // 创建时立即记录创建时间
-                app.todos.insert(0, Todo::new(title, app.now));
+                // 创建时立即记录创建时间与描述
+                let description = app.description_input.trim().to_owned();
+                app.todos.insert(0, Todo::new(title, description, app.now));
                 app.input.clear();
+                app.description_input.clear();
                 return persist(app);
             }
         }
@@ -174,6 +181,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::SelectProject(selection) => app.selected_project = selection,
 
+        Message::ToggleSidebar => app.sidebar_visible = !app.sidebar_visible,
+
         Message::AssignProject {
             todo_id,
             project_id,
@@ -225,7 +234,6 @@ mod tests {
         let _ = update(app, Message::AddTodo);
         app.todos[0].id
     }
-
     fn add_project(app: &mut App, name: &str) -> Uuid {
         app.project_input = name.into();
         let _ = update(app, Message::AddProject);
@@ -258,6 +266,41 @@ mod tests {
 
         assert!(app.todos.is_empty());
         assert!(!app.input.is_empty()); // 输入内容保留，便于用户修改
+    }
+
+    #[test]
+    fn add_todo_with_description_trims_and_clears() {
+        let now = Utc::now();
+        let mut app = app_with(now);
+        app.input = "写周报".into();
+        app.description_input = "  整理本周数据  ".into();
+
+        let _ = update(&mut app, Message::AddTodo);
+
+        assert_eq!(app.todos[0].title, "写周报");
+        assert_eq!(app.todos[0].description, "整理本周数据"); // trim 后存储
+        assert!(app.input.is_empty());
+        assert!(app.description_input.is_empty());
+
+        // 空描述同样可以创建
+        app.input = "无描述任务".into();
+        let _ = update(&mut app, Message::AddTodo);
+        assert_eq!(app.todos[0].description, "");
+    }
+
+    #[test]
+    fn blank_title_ignored_even_with_description() {
+        let mut app = App {
+            input: "   ".into(),
+            description_input: "有描述但标题为空".into(),
+            ..App::default()
+        };
+
+        let _ = update(&mut app, Message::AddTodo);
+
+        assert!(app.todos.is_empty());
+        assert!(!app.input.is_empty()); // 标题输入保留
+        assert_eq!(app.description_input, "有描述但标题为空"); // 描述输入保留
     }
 
     #[test]
@@ -487,10 +530,22 @@ mod tests {
     }
 
     #[test]
+    fn toggle_sidebar_flips_visibility() {
+        let mut app = App::default();
+        assert!(!app.sidebar_visible); // 启动默认收起
+
+        let _ = update(&mut app, Message::ToggleSidebar);
+        assert!(app.sidebar_visible);
+
+        let _ = update(&mut app, Message::ToggleSidebar);
+        assert!(!app.sidebar_visible);
+    }
+
+    #[test]
     fn loaded_populates_todos_and_projects() {
         let mut app = App::default();
         let store = Store {
-            todos: vec![Todo::new("任务".into(), Utc::now())],
+            todos: vec![Todo::new("任务".into(), "描述".into(), Utc::now())],
             projects: vec![Project::new("工作".into(), Utc::now())],
         };
 

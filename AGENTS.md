@@ -12,7 +12,8 @@ description: Iced Todos 桌面待办应用 —— Rust + iced 0.14（Elm 架构�
 
 一个使用 [Iced](https://iced.rs) 0.14 开发的待办清单（Todos）桌面应用，核心特性：
 
-- 添加 / 开始 / 完成 / 删除任务，每个任务记录**创建 / 开始 / 结束**三个时间点
+- 添加 / 开始 / 完成 / 删除任务，每个任务记录**创建 / 开始 / 结束**三个时间点，可带可选**描述**
+- 项目侧边栏可**收起 / 展开**（纯 UI 状态，不持久化，启动默认收起）
 - 进行中任务显示**每秒实时**刷新耗时
 - 任务列表 JSON 持久化，重启不丢失
 - 深色主题，中文界面
@@ -46,7 +47,7 @@ src/
 ├── main.rs     入口：iced::application 装配（boot / update / view / subscription）
 ├── model.rs    数据模型：Todo、Project、TodoStatus、App（纯数据，无 IO）
 ├── update.rs   Message 枚举 + update 纯函数（状态流转、副作用派发）
-├── view.rs     视图：项目侧边栏 + 任务区（输入行、任务卡片、时间元信息）
+├── view.rs     视图：项目侧边栏（可收放）+ 任务区（输入行、任务卡片、时间元信息）
 ├── storage.rs  持久化：异步 JSON 读写（Store = 任务 + 项目，兼容旧格式）
 docs/
 └── 方案.md     设计文档 —— 需求 R1-R10、架构图、验收标准，改行为前必读
@@ -63,12 +64,13 @@ docs/
 2. **update 是纯函数。** 所有时间戳一律取自 `app.now`（由每秒 `Tick` 消息刷新），**不要**在 update 里直接调用 `Utc::now()`。副作用只通过返回的 `Task` 表达。
 3. **时间统一 UTC 存储**（`DateTime<Utc>`），仅在 view 层用 `chrono::Local` 格式化展示。
 4. **持久化 fire-and-forget**：每次状态变更后把整个 `Store`（todos + projects）`serde_json::to_string_pretty` 序列化，经 `Task::perform(storage::save, Message::Saved)` 异步写盘；`Saved` 成功消息静默，失败写入 `app.error`。不引入增量同步。
-5. **数据向后兼容**：`Todo.project_id` 带 `#[serde(default)]`；`storage::load` 对旧版纯数组格式自动迁移为 `Store`，不得破坏旧数据。
+5. **数据向后兼容**：`Todo.project_id` 与 `Todo.description` 带 `#[serde(default)]`；`storage::load` 对旧版纯数组格式自动迁移为 `Store`，不得破坏旧数据。
 6. **项目语义**：项目名 trim 后非空且不重名；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
-7. **新任务插在最前**（`todos.insert(0, ...)`）；输入自动 `trim()`，空白标题静默忽略且保留输入框内容。
-8. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。
-9. **错误不崩溃**：数据文件缺失视为空数据；损坏 JSON 返回错误并显示在 UI（`app.error`），绝不 panic。
-10. **UI 文案与代码注释使用中文**；模块级 `//!` + 公开项 `///` 文档注释是标配。
+7. **新任务插在最前**（`todos.insert(0, ...)`）；标题与描述输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）。
+8. **侧边栏收放是纯 UI 状态**（`App.sidebar_visible`）：只存内存、**不参与持久化**，启动默认收起；`ToggleSidebar` 不触发落盘。
+9. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。
+10. **错误不崩溃**：数据文件缺失视为空数据；损坏 JSON 返回错误并显示在 UI（`app.error`），绝不 panic。
+11. **UI 文案与代码注释使用中文**；模块级 `//!` + 公开项 `///` 文档注释是标配。
 
 ## 5. 代码风格
 

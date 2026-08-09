@@ -30,8 +30,9 @@ impl TodoStatus {
     }
 }
 
-/// 一条任务记录：标题 + 归属项目 + 三个关键时间点。
+/// 一条任务记录：标题 + 可选描述 + 归属项目 + 三个关键时间点。
 ///
+/// - `description`：可选描述（空串 = 无描述，创建时填写，卡片只读显示）
 /// - `project_id`：所属项目（可选，`None` 表示未归属）
 /// - `created_at`：创建时间（添加任务时自动记录，不可为空）
 /// - `started_at`：开始时间（点击"开始"时记录）
@@ -42,6 +43,10 @@ impl TodoStatus {
 pub struct Todo {
     pub id: Uuid,
     pub title: String,
+    /// 可选描述（空串 = 无描述）。
+    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
+    #[serde(default)]
+    pub description: String,
     /// 所属项目（`None` = 未归属）。
     /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
     #[serde(default)]
@@ -52,11 +57,12 @@ pub struct Todo {
 }
 
 impl Todo {
-    /// 创建一条新任务（此时即记录创建时间）。
-    pub fn new(title: String, now: DateTime<Utc>) -> Self {
+    /// 创建一条新任务（此时即记录创建时间与描述）。
+    pub fn new(title: String, description: String, now: DateTime<Utc>) -> Self {
         Self {
             id: Uuid::now_v7(),
             title,
+            description,
             project_id: None,
             created_at: now,
             started_at: None,
@@ -116,6 +122,8 @@ pub struct App {
     pub projects: Vec<Project>,
     /// 输入框当前文本
     pub input: String,
+    /// 描述输入框当前文本
+    pub description_input: String,
     /// 新建项目输入框当前文本
     pub project_input: String,
     /// 当前筛选的项目（`None` = 全部）
@@ -128,6 +136,8 @@ pub struct App {
     pub error: Option<String>,
     /// "当前时间"，由每秒的时钟订阅刷新，用于实时耗时显示
     pub now: DateTime<Utc>,
+    /// 项目侧边栏是否展开（纯 UI 状态，不持久化，启动默认收起）
+    pub sidebar_visible: bool,
 }
 
 impl Default for App {
@@ -136,12 +146,14 @@ impl Default for App {
             todos: Vec::new(),
             projects: Vec::new(),
             input: String::new(),
+            description_input: String::new(),
             project_input: String::new(),
             selected_project: None,
             editing_project: None,
             project_edit_input: String::new(),
             error: None,
             now: Utc::now(),
+            sidebar_visible: false,
         }
     }
 }
@@ -158,7 +170,7 @@ mod tests {
     #[test]
     fn new_todo_records_creation_time() {
         let now = dt(1_700_000_000);
-        let todo = Todo::new("写方案".into(), now);
+        let todo = Todo::new("写方案".into(), "".into(), now);
 
         assert_eq!(todo.created_at, now);
         assert_eq!(todo.started_at, None);
@@ -167,9 +179,36 @@ mod tests {
     }
 
     #[test]
+    fn new_todo_stores_description() {
+        let now = dt(1_700_000_000);
+        let todo = Todo::new("写方案".into(), "先读需求再动手".into(), now);
+
+        assert_eq!(todo.description, "先读需求再动手");
+
+        let no_description = Todo::new("空描述".into(), "".into(), now);
+        assert!(no_description.description.is_empty());
+    }
+
+    #[test]
+    fn legacy_json_without_description_defaults_to_empty() {
+        // 旧版数据：没有 description 字段，反序列化应自动落空
+        let json = r#"{
+            "id": "0195c7e0-0000-7000-8000-000000000001",
+            "title": "旧任务",
+            "created_at": "2026-01-01T10:00:00Z",
+            "started_at": null,
+            "finished_at": null
+        }"#;
+        let todo: Todo = serde_json::from_str(json).unwrap();
+        assert_eq!(todo.title, "旧任务");
+        assert!(todo.description.is_empty());
+        assert_eq!(todo.project_id, None);
+    }
+
+    #[test]
     fn status_is_derived_from_times() {
         let now = dt(1_700_000_000);
-        let mut todo = Todo::new("编码".into(), now);
+        let mut todo = Todo::new("编码".into(), "".into(), now);
 
         todo.started_at = Some(dt(1_700_000_100));
         assert_eq!(todo.status(), TodoStatus::InProgress);
@@ -180,7 +219,7 @@ mod tests {
 
     #[test]
     fn duration_matches_status() {
-        let mut todo = Todo::new("测试".into(), dt(1_700_000_000));
+        let mut todo = Todo::new("测试".into(), "".into(), dt(1_700_000_000));
 
         // 未开始：没有耗时
         assert_eq!(todo.duration(dt(1_700_000_300)), None);
@@ -202,14 +241,14 @@ mod tests {
 
     #[test]
     fn todo_ids_are_unique() {
-        let a = Todo::new("a".into(), dt(1));
-        let b = Todo::new("b".into(), dt(2));
+        let a = Todo::new("a".into(), "".into(), dt(1));
+        let b = Todo::new("b".into(), "".into(), dt(2));
         assert_ne!(a.id, b.id);
     }
 
     #[test]
     fn new_todo_has_no_project() {
-        let todo = Todo::new("无项目".into(), dt(1_700_000_000));
+        let todo = Todo::new("无项目".into(), "".into(), dt(1_700_000_000));
         assert_eq!(todo.project_id, None);
     }
 

@@ -13,6 +13,7 @@ description: Iced Todos 桌面待办应用 —— Rust + iced 0.14（Elm 架构�
 一个使用 [Iced](https://iced.rs) 0.14 开发的待办清单（Todos）桌面应用，核心特性：
 
 - 添加 / 开始 / 完成 / 删除任务，每个任务记录**创建 / 开始 / 结束**三个时间点，可带可选**描述**
+- 任务卡片默认**只读**展示全部属性；点击「编辑」进入编辑模式（即"当前任务"），可修改标题 / 描述 / 项目 / 截止时间
 - 项目侧边栏可**收起 / 展开**（纯 UI 状态，不持久化，启动默认收起）
 - 进行中任务显示**每秒实时**刷新耗时
 - 任务列表 JSON 持久化，重启不丢失
@@ -47,10 +48,10 @@ src/
 ├── main.rs     入口：iced::application 装配（boot / update / view / subscription）
 ├── model.rs    数据模型：Todo、Project、TodoStatus、App（纯数据，无 IO）
 ├── update.rs   Message 枚举 + update 纯函数（状态流转、副作用派发）
-├── view.rs     视图：项目侧边栏（可收放）+ 任务区（输入行、任务卡片、时间元信息）
+├── view.rs     视图：项目侧边栏（可收放）+ 任务区（输入行、任务卡片/编辑模式、时间元信息）
 ├── storage.rs  持久化：异步 JSON 读写（Store = 任务 + 项目，兼容旧格式）
 docs/
-└── 方案.md     设计文档 —— 需求 R1-R10、架构图、验收标准，改行为前必读
+└── 方案.md     设计文档 —— 需求 R1-R15、架构图、验收标准，改行为前必读
 ```
 
 数据流（Elm 架构）：**视图产生 Message → update 更新状态 → 视图重新渲染**；
@@ -66,11 +67,12 @@ docs/
 4. **持久化 fire-and-forget**：每次状态变更后把整个 `Store`（todos + projects）`serde_json::to_string_pretty` 序列化，经 `Task::perform(storage::save, Message::Saved)` 异步写盘；`Saved` 成功消息静默，失败写入 `app.error`。不引入增量同步。
 5. **数据向后兼容**：`Todo.project_id` 与 `Todo.description` 带 `#[serde(default)]`；`storage::load` 对旧版纯数组格式自动迁移为 `Store`，不得破坏旧数据。
 6. **项目语义**：项目名 trim 后非空且不重名；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
-7. **新任务插在最前**（`todos.insert(0, ...)`）；标题与描述输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）；弹窗添加（`SubmitAddDialog`）同样插最前、时间取自 `app.now`，校验不过（空白标题 / 截止时间格式非法 / 项目不存在）时弹窗保持打开、输入保留。
-8. **侧边栏收放与弹窗表单是纯 UI 状态**（`App.sidebar_visible` / `App.add_dialog`）：只存内存、**不参与持久化**，启动默认收起 / 关闭；`ToggleSidebar`、弹窗的打开/关闭/各输入变化均不触发落盘（`SubmitAddDialog` 创建成功才落盘）。
+7. **新任务插在最前**（`todos.insert(0, ...)`）；**快捷添加仅标题**（描述 / 截止时间经弹窗新建、经编辑模式修改）；标题 / 描述 / 项目名输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）；弹窗添加（`SubmitAddDialog`）插最前、编辑保存（`SaveEditTodo`）就地更新，时间均取自 `app.now`；两者校验不过（空白标题 / 截止时间格式非法 / 项目不存在）时弹窗保持打开 / 保持编辑态、输入保留。
+8. **侧边栏收放、弹窗表单与卡片编辑表单是纯 UI 状态**（`App.sidebar_visible` / `App.add_dialog` / `App.todo_edit`）：只存内存、**不参与持久化**，启动默认收起 / 关闭 / 无编辑；`ToggleSidebar`、弹窗与编辑表单的打开/关闭/各输入变化均不触发落盘（`SubmitAddDialog` 创建成功、`SaveEditTodo` 保存成功才落盘）。
 9. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。
 10. **错误不崩溃**：数据文件缺失视为空数据；损坏 JSON 返回错误并显示在 UI（`app.error`），绝不 panic。
 11. **UI 文案与代码注释使用中文**；模块级 `//!` + 公开项 `///` 文档注释是标配。
+12. **卡片默认只读，修改须进编辑模式**：主界面任务卡片全部属性只读展示（项目归属也是只读文字，无 `AssignProject` 消息——归属只能经编辑模式保存）；点击「编辑」进入该卡片的编辑模式（即"当前任务"，`App.todo_edit`），可改标题 / 描述 / 项目 / 截止时间，保存校验同弹窗；**时间字段（创建 / 开始 / 结束）永不直接编辑**（自动记录，状态由它们推导）；切换编辑其他卡片时未保存修改被丢弃。
 
 ## 5. 代码风格
 

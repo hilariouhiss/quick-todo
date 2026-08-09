@@ -8,7 +8,9 @@ use chrono::{DateTime, Utc};
 use iced::Task;
 use uuid::Uuid;
 
-use crate::model::{AddDialog, App, Project, QuickDue, Todo, TodoStatus, parse_due};
+use crate::model::{
+    AddDialog, App, Project, QuickDue, Todo, TodoEdit, TodoStatus, format_due, parse_due,
+};
 use crate::storage::{self, Store};
 use crate::view::DIALOG_TITLE_ID;
 
@@ -17,8 +19,6 @@ use crate::view::DIALOG_TITLE_ID;
 pub enum Message {
     /// 输入框内容变化
     InputChanged(String),
-    /// 描述输入框内容变化
-    DescriptionInputChanged(String),
     /// 添加任务（回车或点击"添加"）
     AddTodo,
     /// 开始任务：记录开始时间
@@ -49,11 +49,22 @@ pub enum Message {
     DeleteProject(Uuid),
     /// 选中项目筛选（`None` = 全部）
     SelectProject(Option<Uuid>),
-    /// 设置任务的归属项目（`None` = 解除归属）
-    AssignProject {
-        todo_id: Uuid,
-        project_id: Option<Uuid>,
-    },
+    /// 进入卡片编辑模式（预填当前字段；该卡片即"当前任务"）
+    EditTodo(Uuid),
+    /// 退出卡片编辑模式（丢弃修改，不落盘）
+    CancelEditTodo,
+    /// 编辑：标题输入框变化
+    EditTitleChanged(String),
+    /// 编辑：描述输入框变化
+    EditDescriptionChanged(String),
+    /// 编辑：项目下拉选择
+    EditProjectChanged(Option<Uuid>),
+    /// 编辑：截止时间输入框变化（实时解析校验）
+    EditDueChanged(String),
+    /// 编辑：快捷时间下拉选择（回填到截止时间输入框）
+    EditQuickDue(QuickDue),
+    /// 编辑：点击"保存"/回车（校验通过后更新任务并落盘）
+    SaveEditTodo,
     /// 收起 / 展开项目侧边栏（纯 UI 状态，不触发落盘）
     ToggleSidebar,
     /// 打开弹窗添加任务（预选当前筛选的项目）
@@ -78,16 +89,13 @@ pub enum Message {
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::InputChanged(text) => app.input = text,
-        Message::DescriptionInputChanged(text) => app.description_input = text,
 
         Message::AddTodo => {
             let title = app.input.trim().to_owned();
             if !title.is_empty() {
-                // 创建时立即记录创建时间与描述
-                let description = app.description_input.trim().to_owned();
-                app.todos.insert(0, Todo::new(title, description, app.now));
+                // 创建时立即记录创建时间；快捷添加仅标题（描述经弹窗填写）
+                app.todos.insert(0, Todo::new(title, app.now));
                 app.input.clear();
-                app.description_input.clear();
                 return persist(app);
             }
         }
@@ -291,20 +299,101 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             return persist(app);
         }
 
-        Message::AssignProject {
-            todo_id,
-            project_id,
-        } => {
+        Message::EditTodo(id) => {
+            if let Some(todo) = app.todos.iter().find(|todo| todo.id == id) {
+                // 预填当前字段；截止时间回填为可解析文本（分钟粒度）
+                app.todo_edit = Some(TodoEdit {
+                    todo_id: id,
+                    title: todo.title.clone(),
+                    description: todo.description.clone(),
+                    project_id: todo.project_id,
+                    due_input: todo.due_at.map(format_due).unwrap_or_default(),
+                    due_parsed: Ok(todo.due_at),
+                });
+            }
+        }
+
+        Message::CancelEditTodo => {
+            // 退出编辑模式：丢弃修改（编辑表单是纯内存状态，不落盘）
+            app.todo_edit = None;
+        }
+
+        Message::EditTitleChanged(text) => {
+            if let Some(edit) = &mut app.todo_edit {
+                edit.title = text;
+            }
+        }
+
+        Message::EditDescriptionChanged(text) => {
+            if let Some(edit) = &mut app.todo_edit {
+                edit.description = text;
+            }
+        }
+
+        Message::EditProjectChanged(project_id) => {
             // 防御：项目必须存在（已被删除的项目不可再被选中）
             if !project_id.is_none_or(|id| app.projects.iter().any(|p| p.id == id)) {
                 return Task::none();
             }
-            if let Some(todo) = app.todos.iter_mut().find(|todo| todo.id == todo_id)
-                && todo.project_id != project_id
-            {
-                todo.project_id = project_id;
-                return persist(app);
+            if let Some(edit) = &mut app.todo_edit {
+                edit.project_id = project_id;
             }
+        }
+
+        Message::EditDueChanged(text) => {
+            if let Some(edit) = &mut app.todo_edit {
+                // 实时解析：非法格式立即提示（due_parsed 缓存结果）
+                edit.due_parsed = parse_due(&text);
+                edit.due_input = text;
+            }
+        }
+
+        Message::EditQuickDue(quick) => {
+            if let Some(edit) = &mut app.todo_edit {
+                // 快捷时间：基于 app.now 的本地时区计算，回填文本后走统一解析
+                let text = quick.due_text(app.now);
+                edit.due_parsed = parse_due(&text);
+                edit.due_input = text;
+            }
+        }
+
+        Message::SaveEditTodo => {
+            // 校验不通过时保持编辑态（保留用户输入），不产生任何副作用
+            let Some(edit) = app.todo_edit.take() else {
+                return Task::none();
+            };
+            let restore = |app: &mut App| app.todo_edit = Some(edit.clone());
+
+            let title = edit.title.trim().to_owned();
+            if title.is_empty() {
+                restore(app);
+                return Task::none();
+            }
+            let due_at = match edit.due_parsed {
+                Ok(due) => due,
+                Err(_) => {
+                    restore(app);
+                    return Task::none();
+                }
+            };
+            if !edit
+                .project_id
+                .is_none_or(|id| app.projects.iter().any(|p| p.id == id))
+            {
+                restore(app);
+                return Task::none();
+            }
+
+            // 校验通过：更新任务（trim 后存储）并退出编辑模式
+            let Some(todo) = app.todos.iter_mut().find(|todo| todo.id == edit.todo_id) else {
+                // 任务已被删除：直接退出编辑模式
+                return Task::none();
+            };
+            todo.title = title;
+            todo.description = edit.description.trim().to_owned();
+            todo.project_id = edit.project_id;
+            todo.due_at = due_at;
+            return persist(app);
         }
     }
 
@@ -359,6 +448,7 @@ mod tests {
         assert_eq!(app.todos.len(), 1);
         assert_eq!(app.todos[0].title, "写周报"); // 自动去除首尾空白
         assert_eq!(app.todos[0].created_at, now); // 创建时间被记录
+        assert_eq!(app.todos[0].description, ""); // 快捷添加不带描述
         assert_eq!(app.todos[0].status(), TodoStatus::Pending);
         assert!(app.input.is_empty());
     }
@@ -374,41 +464,6 @@ mod tests {
 
         assert!(app.todos.is_empty());
         assert!(!app.input.is_empty()); // 输入内容保留，便于用户修改
-    }
-
-    #[test]
-    fn add_todo_with_description_trims_and_clears() {
-        let now = Utc::now();
-        let mut app = app_with(now);
-        app.input = "写周报".into();
-        app.description_input = "  整理本周数据  ".into();
-
-        let _ = update(&mut app, Message::AddTodo);
-
-        assert_eq!(app.todos[0].title, "写周报");
-        assert_eq!(app.todos[0].description, "整理本周数据"); // trim 后存储
-        assert!(app.input.is_empty());
-        assert!(app.description_input.is_empty());
-
-        // 空描述同样可以创建
-        app.input = "无描述任务".into();
-        let _ = update(&mut app, Message::AddTodo);
-        assert_eq!(app.todos[0].description, "");
-    }
-
-    #[test]
-    fn blank_title_ignored_even_with_description() {
-        let mut app = App {
-            input: "   ".into(),
-            description_input: "有描述但标题为空".into(),
-            ..App::default()
-        };
-
-        let _ = update(&mut app, Message::AddTodo);
-
-        assert!(app.todos.is_empty());
-        assert!(!app.input.is_empty()); // 标题输入保留
-        assert_eq!(app.description_input, "有描述但标题为空"); // 描述输入保留
     }
 
     #[test]
@@ -563,13 +618,11 @@ mod tests {
         let mut app = App::default();
         let pid = add_project(&mut app, "工作");
         let todo_id = add_todo(&mut app, "写方案");
-        let _ = update(
-            &mut app,
-            Message::AssignProject {
-                todo_id,
-                project_id: Some(pid),
-            },
-        );
+        app.todos
+            .iter_mut()
+            .find(|t| t.id == todo_id)
+            .unwrap()
+            .project_id = Some(pid);
         let _ = update(&mut app, Message::SelectProject(Some(pid)));
         let _ = update(&mut app, Message::StartRenameProject(pid));
         assert_eq!(app.todos[0].project_id, Some(pid));
@@ -580,49 +633,6 @@ mod tests {
         assert_eq!(app.todos[0].project_id, None); // 任务保留，归属解除
         assert_eq!(app.selected_project, None); // 筛选复位
         assert_eq!(app.editing_project, None); // 编辑态复位
-    }
-
-    #[test]
-    fn assign_project_sets_and_clears() {
-        let mut app = App::default();
-        let pid = add_project(&mut app, "工作");
-        let todo_id = add_todo(&mut app, "写方案");
-
-        // 归属
-        let _ = update(
-            &mut app,
-            Message::AssignProject {
-                todo_id,
-                project_id: Some(pid),
-            },
-        );
-        assert_eq!(app.todos[0].project_id, Some(pid));
-
-        // 解除归属
-        let _ = update(
-            &mut app,
-            Message::AssignProject {
-                todo_id,
-                project_id: None,
-            },
-        );
-        assert_eq!(app.todos[0].project_id, None);
-    }
-
-    #[test]
-    fn assign_unknown_project_is_rejected() {
-        let mut app = App::default();
-        let todo_id = add_todo(&mut app, "写方案");
-
-        let _ = update(
-            &mut app,
-            Message::AssignProject {
-                todo_id,
-                project_id: Some(Uuid::now_v7()),
-            },
-        );
-
-        assert_eq!(app.todos[0].project_id, None);
     }
 
     #[test]
@@ -653,7 +663,7 @@ mod tests {
     fn loaded_populates_todos_and_projects() {
         let mut app = App::default();
         let store = Store {
-            todos: vec![Todo::new("任务".into(), "描述".into(), Utc::now())],
+            todos: vec![Todo::new("任务".into(), Utc::now())],
             projects: vec![Project::new("工作".into(), Utc::now())],
         };
 
@@ -841,6 +851,202 @@ mod tests {
     fn submit_without_open_dialog_is_noop() {
         let mut app = App::default();
         let _ = update(&mut app, Message::SubmitAddDialog);
+        assert!(app.todos.is_empty());
+    }
+
+    // ---------- 卡片编辑 ----------
+
+    #[test]
+    fn edit_todo_prefills_current_fields() {
+        let now = Utc::now();
+        let mut app = app_with(now);
+        let pid = add_project(&mut app, "工作");
+        let todo_id = add_todo(&mut app, "写方案");
+        app.todos[0].description = "先读需求".into();
+        app.todos[0].project_id = Some(pid);
+        app.todos[0].due_at = Some(now);
+
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+
+        let edit = app.todo_edit.as_ref().unwrap();
+        assert_eq!(edit.todo_id, todo_id);
+        assert_eq!(edit.title, "写方案");
+        assert_eq!(edit.description, "先读需求");
+        assert_eq!(edit.project_id, Some(pid));
+        assert!(!edit.due_input.is_empty()); // 截止时间回填为可解析文本
+        assert!(edit.due_parsed.is_ok());
+    }
+
+    #[test]
+    fn edit_todo_unknown_id_is_noop() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::EditTodo(Uuid::now_v7()));
+        assert!(app.todo_edit.is_none());
+    }
+
+    #[test]
+    fn edit_inputs_update_form() {
+        let mut app = App::default();
+        let pid = add_project(&mut app, "工作");
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+
+        let _ = update(&mut app, Message::EditTitleChanged(" 改标题 ".into()));
+        let _ = update(&mut app, Message::EditDescriptionChanged("新描述".into()));
+        let _ = update(&mut app, Message::EditProjectChanged(Some(pid)));
+        let _ = update(&mut app, Message::EditDueChanged("2026-01-31 18:30".into()));
+
+        let edit = app.todo_edit.as_ref().unwrap();
+        assert_eq!(edit.title, " 改标题 ");
+        assert_eq!(edit.description, "新描述");
+        assert_eq!(edit.project_id, Some(pid));
+        assert!(edit.due_parsed.as_ref().unwrap().is_some());
+    }
+
+    #[test]
+    fn edit_inputs_ignored_when_not_editing() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::EditTitleChanged("x".into()));
+        let _ = update(&mut app, Message::EditDueChanged("2026-01-31".into()));
+        assert!(app.todo_edit.is_none());
+    }
+
+    #[test]
+    fn edit_unknown_project_is_rejected() {
+        let mut app = App::default();
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+        let _ = update(&mut app, Message::EditProjectChanged(Some(Uuid::now_v7())));
+        assert_eq!(app.todo_edit.as_ref().unwrap().project_id, None);
+    }
+
+    #[test]
+    fn edit_quick_due_fills_and_parses() {
+        let mut app = app_with(Utc::now());
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+
+        let _ = update(&mut app, Message::EditQuickDue(QuickDue::Tomorrow));
+
+        let edit = app.todo_edit.as_ref().unwrap();
+        assert!(edit.due_input.contains("23:59")); // 回填文本
+        assert!(edit.due_parsed.as_ref().unwrap().is_some()); // 可解析
+    }
+
+    #[test]
+    fn cancel_edit_discards_changes() {
+        let mut app = App::default();
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+        let _ = update(&mut app, Message::EditTitleChanged("改到一半".into()));
+
+        let _ = update(&mut app, Message::CancelEditTodo);
+
+        assert!(app.todo_edit.is_none());
+        assert_eq!(app.todos[0].title, "写方案"); // 任务未变
+    }
+
+    #[test]
+    fn switching_edit_target_discards_uncommitted() {
+        let mut app = App::default();
+        let a = add_todo(&mut app, "任务 A");
+        let b = add_todo(&mut app, "任务 B");
+        let _ = update(&mut app, Message::EditTodo(a));
+        let _ = update(&mut app, Message::EditTitleChanged("改 A".into()));
+
+        let _ = update(&mut app, Message::EditTodo(b));
+
+        let edit = app.todo_edit.as_ref().unwrap();
+        assert_eq!(edit.todo_id, b);
+        assert_eq!(edit.title, "任务 B"); // A 的未保存修改被丢弃
+    }
+
+    #[test]
+    fn save_edit_commits_all_fields() {
+        let now = Utc::now();
+        let mut app = app_with(now);
+        let pid = add_project(&mut app, "工作");
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+        let _ = update(&mut app, Message::EditTitleChanged("  写周报  ".into()));
+        let _ = update(
+            &mut app,
+            Message::EditDescriptionChanged("  整理数据  ".into()),
+        );
+        let _ = update(&mut app, Message::EditProjectChanged(Some(pid)));
+        let _ = update(&mut app, Message::EditDueChanged("2026-01-31 18:30".into()));
+
+        let _ = update(&mut app, Message::SaveEditTodo);
+
+        assert!(app.todo_edit.is_none()); // 退出编辑模式
+        let todo = &app.todos[0];
+        assert_eq!(todo.title, "写周报"); // trim 后提交
+        assert_eq!(todo.description, "整理数据");
+        assert_eq!(todo.project_id, Some(pid));
+        assert!(todo.due_at.is_some());
+        assert_eq!(todo.created_at, now); // 时间字段不受影响
+        assert_eq!(todo.status(), TodoStatus::Pending);
+    }
+
+    #[test]
+    fn save_edit_blank_title_keeps_editing() {
+        let mut app = App::default();
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+        let _ = update(&mut app, Message::EditTitleChanged("   ".into()));
+
+        let _ = update(&mut app, Message::SaveEditTodo);
+
+        assert!(app.todo_edit.is_some()); // 保持编辑模式
+        assert_eq!(app.todo_edit.as_ref().unwrap().title, "   "); // 输入保留
+        assert_eq!(app.todos[0].title, "写方案"); // 任务未变
+    }
+
+    #[test]
+    fn save_edit_invalid_due_keeps_editing() {
+        let mut app = App::default();
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+        let _ = update(&mut app, Message::EditDueChanged("后天".into()));
+
+        let _ = update(&mut app, Message::SaveEditTodo);
+
+        assert!(app.todo_edit.is_some());
+        assert_eq!(app.todos[0].due_at, None);
+    }
+
+    #[test]
+    fn save_edit_unknown_project_keeps_editing() {
+        let mut app = App::default();
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+        // 防御层漏检场景：直接构造非法归属（如项目在编辑期间被删除）
+        app.todo_edit.as_mut().unwrap().project_id = Some(Uuid::now_v7());
+
+        let _ = update(&mut app, Message::SaveEditTodo);
+
+        assert!(app.todo_edit.is_some()); // 保持编辑模式
+        assert_eq!(app.todos[0].project_id, None); // 任务未变
+    }
+
+    #[test]
+    fn save_edit_deleted_todo_exits_editing() {
+        let mut app = App::default();
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+        // 任务在编辑期间被删除（防御路径）：保存仅退出编辑态，无副作用
+        app.todos.clear();
+
+        let _ = update(&mut app, Message::SaveEditTodo);
+
+        assert!(app.todo_edit.is_none());
+        assert!(app.todos.is_empty());
+    }
+
+    #[test]
+    fn save_without_editing_is_noop() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::SaveEditTodo);
         assert!(app.todos.is_empty());
     }
 }

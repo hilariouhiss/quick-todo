@@ -61,31 +61,24 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
     .align_y(Alignment::Center);
 
-    // 输入区：标题行 + 描述行（两个输入框回车均可添加）
-    let input_column = column![
-        row![
-            text_input("输入任务内容，回车或点击“添加”", &app.input)
-                .on_input(Message::InputChanged)
-                .on_submit(Message::AddTodo)
-                .padding(10)
-                .width(Length::Fill),
-            Space::new().width(8),
-            button(text("添加").size(15))
-                .on_press(Message::AddTodo)
-                .padding([10, 22]),
-            Space::new().width(6),
-            button(text("详细添加…").size(13))
-                .on_press(Message::OpenAddDialog)
-                .style(button::secondary)
-                .padding([10, 12]),
-        ]
-        .align_y(Alignment::Center),
-        text_input("任务描述（可选），回车同样可添加", &app.description_input)
-            .on_input(Message::DescriptionInputChanged)
+    // 输入区：标题输入行（回车或点击"添加"即可创建；描述经「详细添加…」弹窗填写）
+    let input_column = row![
+        text_input("输入任务内容，回车或点击“添加”", &app.input)
+            .on_input(Message::InputChanged)
             .on_submit(Message::AddTodo)
-            .padding(10),
+            .padding(10)
+            .width(Length::Fill),
+        Space::new().width(8),
+        button(text("添加").size(15))
+            .on_press(Message::AddTodo)
+            .padding([10, 22]),
+        Space::new().width(6),
+        button(text("详细添加…").size(13))
+            .on_press(Message::OpenAddDialog)
+            .style(button::secondary)
+            .padding([10, 12]),
     ]
-    .spacing(8);
+    .align_y(Alignment::Center);
 
     let mut body = column![header, input_column]
         .spacing(12)
@@ -177,23 +170,17 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         .on_submit(Message::SubmitAddDialog)
         .padding(10);
 
-    // 所属项目：复用卡片上的选项包装（"无项目" + 全部项目）
-    let options: Vec<ProjectChoice> = std::iter::once(ProjectChoice::none())
-        .chain(app.projects.iter().map(ProjectChoice::of))
-        .collect();
-    let selected = dialog
-        .project_id
-        .and_then(|id| app.projects.iter().find(|p| p.id == id))
-        .map(ProjectChoice::of)
-        .unwrap_or_else(ProjectChoice::none);
+    // 所属项目："无项目" + 全部项目（与编辑模式共用选项包装）
     let project_picker = row![
         text("所属项目")
             .size(13)
             .color(MUTED)
             .width(Length::Fixed(72.0)),
-        PickList::new(options, Some(selected), move |choice| {
-            Message::DialogProjectChanged(choice.id)
-        },)
+        PickList::new(
+            project_choices(app),
+            Some(ProjectChoice::of_id(dialog.project_id, &app.projects)),
+            move |choice| { Message::DialogProjectChanged(choice.id) },
+        )
         .placeholder("无项目")
         .text_size(13)
         .padding([4, 8])
@@ -459,7 +446,16 @@ fn todo_list<'a>(app: &'a App, todos: Vec<&'a Todo>) -> Element<'a, Message> {
 }
 
 /// 单个任务的卡片：标题 + 可选描述 + 状态徽章 + 操作按钮 + 时间元信息。
+/// 默认全部属性只读展示；该卡片处于编辑模式时（"当前任务"）渲染可编辑表单。
 fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
+    if app
+        .todo_edit
+        .as_ref()
+        .is_some_and(|edit| edit.todo_id == todo.id)
+    {
+        return todo_card_editor(todo, app);
+    }
+
     let head = row![
         text(todo.title.as_str()).size(16).font(BOLD),
         Space::new().width(Length::Fill),
@@ -500,9 +496,15 @@ fn status_color(status: TodoStatus) -> Color {
     }
 }
 
-/// 操作按钮：按状态显示"开始 / 完成"，始终有"删除"。
+/// 操作按钮：编辑 + 按状态显示"开始 / 完成"，始终有"删除"。
 fn actions(todo: &Todo) -> Element<'_, Message> {
-    let mut actions = row![].spacing(6);
+    let mut actions = row![
+        button(text("编辑").size(13))
+            .on_press(Message::EditTodo(todo.id))
+            .style(button::text)
+            .padding([6, 10])
+    ]
+    .spacing(6);
 
     match todo.status() {
         TodoStatus::Pending => {
@@ -568,26 +570,39 @@ fn card_style(theme: &iced::Theme) -> container::Style {
     }
 }
 
-// ---------- 任务元信息 ----------
+// ---------- 卡片编辑模式 ----------
 
-/// 归属项目选择器（pick_list）：切换 / 解除任务的项目归属。
-fn project_picker_row<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
-    let options: Vec<ProjectChoice> = std::iter::once(ProjectChoice::none())
-        .chain(app.projects.iter().map(ProjectChoice::of))
-        .collect();
+/// 可编辑模式的卡片（即"当前任务"）：标题 / 描述 / 项目 / 截止时间可修改，
+/// 保存校验同弹窗；时间字段保持只读展示；主题主色描边与普通卡片区分。
+fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
+    let edit = app
+        .todo_edit
+        .as_ref()
+        .expect("编辑模式仅在 todo_edit 命中该卡片时渲染");
 
-    row![
+    // 标题（必填）：回车保存
+    let title_input = text_input("任务标题（必填）", &edit.title)
+        .on_input(Message::EditTitleChanged)
+        .on_submit(Message::SaveEditTodo)
+        .padding(8)
+        .width(Length::Fill);
+
+    // 描述（可选）：回车保存
+    let description_input = text_input("任务描述（可选）", &edit.description)
+        .on_input(Message::EditDescriptionChanged)
+        .on_submit(Message::SaveEditTodo)
+        .padding(8);
+
+    // 所属项目：复用卡片上的选项包装（"无项目" + 全部项目）
+    let project_picker = row![
         text("项目")
             .size(13)
             .color(MUTED)
             .width(Length::Fixed(72.0)),
         PickList::new(
-            options,
-            Some(ProjectChoice::of_todo(todo, &app.projects)),
-            move |choice| Message::AssignProject {
-                todo_id: todo.id,
-                project_id: choice.id,
-            },
+            project_choices(app),
+            Some(ProjectChoice::of_id(edit.project_id, &app.projects)),
+            move |choice| Message::EditProjectChanged(choice.id),
         )
         .placeholder("无项目")
         .text_size(13)
@@ -595,7 +610,100 @@ fn project_picker_row<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> 
         .width(Length::Fill),
     ]
     .spacing(6)
-    .into()
+    .align_y(Alignment::Center);
+
+    // 截止时间：文本输入（实时校验）+ 快捷下拉（回填后仍可手动修改）
+    let due_row = row![
+        text("截止时间")
+            .size(13)
+            .color(MUTED)
+            .width(Length::Fixed(72.0)),
+        text_input("2026-01-31 或 2026-01-31 18:30", &edit.due_input)
+            .on_input(Message::EditDueChanged)
+            .on_submit(Message::SaveEditTodo)
+            .padding(8)
+            .width(Length::Fill),
+        Space::new().width(6),
+        PickList::new(
+            &QUICK_DUE_OPTIONS[..],
+            Option::<QuickDue>::None,
+            Message::EditQuickDue,
+        )
+        .placeholder("快捷时间")
+        .text_size(13)
+        .padding([4, 8]),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    // 头部：标题输入 + 状态徽章 + 保存/取消（标题为空或时间非法时"保存"禁用）
+    let can_submit = !edit.title.trim().is_empty() && edit.due_parsed.is_ok();
+    let head = row![
+        title_input,
+        Space::new().width(8),
+        text(todo.status().label())
+            .size(12)
+            .color(status_color(todo.status())),
+        Space::new().width(8),
+        button(text("保存").size(13))
+            .on_press_maybe(can_submit.then_some(Message::SaveEditTodo))
+            .style(button::primary)
+            .padding([6, 14]),
+        Space::new().width(6),
+        button(text("取消").size(13))
+            .on_press(Message::CancelEditTodo)
+            .padding([6, 10]),
+    ]
+    .align_y(Alignment::Center)
+    .spacing(8);
+
+    // 表单主体；截止时间格式错误时追加红字提示
+    let mut form = column![head, description_input, project_picker, due_row].spacing(8);
+    if let Err(hint) = &edit.due_parsed {
+        form = form.push(text(hint.as_str()).size(12).color(ERROR_COLOR));
+    }
+
+    container(column![form, time_meta_rows(todo, app)].spacing(8))
+        .width(Length::Fill)
+        .padding(12)
+        .style(editor_card_style)
+        .into()
+}
+
+/// 编辑模式卡片样式：主题主色描边，与普通卡片区分。
+fn editor_card_style(theme: &iced::Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(palette.background.weak.color)),
+        border: Border {
+            color: palette.primary.base.color,
+            width: 1.5,
+            radius: 10.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+// ---------- 任务元信息 ----------
+
+/// 项目下拉的选项（"无项目" + 全部项目），弹窗与编辑模式共用。
+fn project_choices(app: &App) -> Vec<ProjectChoice> {
+    std::iter::once(ProjectChoice::none())
+        .chain(app.projects.iter().map(ProjectChoice::of))
+        .collect()
+}
+
+/// 任务归属的只读展示行：项目名（未归属显示"无项目"）。
+/// 项目归属只能在编辑模式下修改（R15）。
+fn project_row_readonly<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
+    let (name, color) = match todo
+        .project_id
+        .and_then(|id| app.projects.iter().find(|p| p.id == id))
+    {
+        Some(project) => (project.name.as_str(), MUTED),
+        None => ("无项目", MUTED),
+    };
+    time_row("项目", name.into(), color)
 }
 
 /// pick_list 的选项包装：`id = None` 表示"无项目"（解除归属）。
@@ -622,12 +730,9 @@ impl ProjectChoice {
         }
     }
 
-    /// 任务的当前归属（项目已被删除时回落为"无项目"）。
-    fn of_todo(todo: &Todo, projects: &[Project]) -> Self {
-        match todo
-            .project_id
-            .and_then(|id| projects.iter().find(|p| p.id == id))
-        {
+    /// 按项目 id 构造选项（项目已被删除时回落为"无项目"）。
+    fn of_id(id: Option<Uuid>, projects: &[Project]) -> Self {
+        match id.and_then(|id| projects.iter().find(|p| p.id == id)) {
             Some(project) => Self::of(project),
             None => Self::none(),
         }
@@ -646,9 +751,10 @@ impl std::fmt::Display for QuickDue {
     }
 }
 
-/// 时间元信息：项目归属 + 截止时间 + 创建 / 开始 / 结束；进行中附实时耗时，已完成附总耗时。
-fn meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
-    let mut meta = column![project_picker_row(todo, app)].spacing(3);
+/// 时间元信息：截止时间 + 创建 / 开始 / 结束；进行中附实时耗时，已完成附总耗时。
+/// （不含项目行：普通模式由 `project_row_readonly` 展示，编辑模式用下拉。）
+fn time_meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
+    let mut meta = column![].spacing(3);
 
     // 截止时间：已逾期且未完成的任务标红提示
     if let Some(due) = todo.due_at {
@@ -687,6 +793,13 @@ fn meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     }
 
     meta.into()
+}
+
+/// 普通模式的任务元信息：归属只读行 + 时间行。
+fn meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
+    column![project_row_readonly(todo, app), time_meta_rows(todo, app)]
+        .spacing(3)
+        .into()
 }
 
 /// 带固定宽度标签的一行时间信息。

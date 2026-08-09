@@ -62,9 +62,9 @@ pub struct Todo {
 }
 
 impl Todo {
-    /// 创建一条新任务（此时即记录创建时间与描述）。
-    pub fn new(title: String, description: String, now: DateTime<Utc>) -> Self {
-        Self::new_full(title, description, None, None, now)
+    /// 创建一条新任务（快捷添加：仅标题，无描述）。
+    pub fn new(title: String, now: DateTime<Utc>) -> Self {
+        Self::new_full(title, String::new(), None, None, now)
     }
 
     /// 创建一条完整配置的新任务（弹窗添加用）：描述 + 归属项目 + 截止时间。
@@ -158,6 +158,25 @@ impl Default for AddDialog {
     }
 }
 
+/// 卡片编辑任务的表单状态（纯内存，不持久化；`App.todo_edit = None` 表示无卡片处于编辑态）。
+/// 编辑态卡片即"当前任务"：标题 / 描述 / 项目 / 截止时间可修改，时间字段保持只读。
+#[derive(Debug, Clone)]
+pub struct TodoEdit {
+    /// 正在编辑的任务 id
+    pub todo_id: Uuid,
+    /// 标题输入
+    pub title: String,
+    /// 描述输入
+    pub description: String,
+    /// 所属项目（`None` = 无项目）
+    pub project_id: Option<Uuid>,
+    /// 截止时间输入框的原始文本
+    pub due_input: String,
+    /// 截止时间的实时解析结果：
+    /// `Ok(None)` = 留空；`Ok(Some)` = 解析成功；`Err` = 格式错误提示
+    pub due_parsed: Result<Option<DateTime<Utc>>, String>,
+}
+
 /// 弹窗内截止时间的快捷选项（选中后回填到文本输入框，仍可手动修改）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuickDue {
@@ -237,6 +256,13 @@ fn local_to_utc(naive: NaiveDateTime) -> Result<DateTime<Utc>, String> {
     }
 }
 
+/// 截止时间 → 输入框回填文本（本地时区、分钟粒度，可被 `parse_due` 解析）。
+pub fn format_due(dt: DateTime<Utc>) -> String {
+    dt.with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+
 /// 应用整体状态（iced 函数式 API 中的 `State`）。
 #[derive(Debug, Clone)]
 pub struct App {
@@ -246,8 +272,6 @@ pub struct App {
     pub projects: Vec<Project>,
     /// 输入框当前文本
     pub input: String,
-    /// 描述输入框当前文本
-    pub description_input: String,
     /// 新建项目输入框当前文本
     pub project_input: String,
     /// 当前筛选的项目（`None` = 全部）
@@ -264,6 +288,8 @@ pub struct App {
     pub sidebar_visible: bool,
     /// 弹窗添加任务表单（`None` = 弹窗关闭；纯内存状态，不持久化）
     pub add_dialog: Option<AddDialog>,
+    /// 卡片编辑表单（`None` = 无卡片处于编辑态；纯内存状态，不持久化）
+    pub todo_edit: Option<TodoEdit>,
 }
 
 impl Default for App {
@@ -272,7 +298,6 @@ impl Default for App {
             todos: Vec::new(),
             projects: Vec::new(),
             input: String::new(),
-            description_input: String::new(),
             project_input: String::new(),
             selected_project: None,
             editing_project: None,
@@ -281,6 +306,7 @@ impl Default for App {
             now: Utc::now(),
             sidebar_visible: false,
             add_dialog: None,
+            todo_edit: None,
         }
     }
 }
@@ -297,7 +323,7 @@ mod tests {
     #[test]
     fn new_todo_records_creation_time() {
         let now = dt(1_700_000_000);
-        let todo = Todo::new("写方案".into(), "".into(), now);
+        let todo = Todo::new("写方案".into(), now);
 
         assert_eq!(todo.created_at, now);
         assert_eq!(todo.started_at, None);
@@ -306,14 +332,10 @@ mod tests {
     }
 
     #[test]
-    fn new_todo_stores_description() {
-        let now = dt(1_700_000_000);
-        let todo = Todo::new("写方案".into(), "先读需求再动手".into(), now);
-
-        assert_eq!(todo.description, "先读需求再动手");
-
-        let no_description = Todo::new("空描述".into(), "".into(), now);
-        assert!(no_description.description.is_empty());
+    fn new_todo_has_empty_description() {
+        // 快捷添加仅标题：描述恒为空串（描述只经弹窗 new_full 填写）
+        let todo = Todo::new("写方案".into(), dt(1_700_000_000));
+        assert!(todo.description.is_empty());
     }
 
     #[test]
@@ -335,7 +357,7 @@ mod tests {
     #[test]
     fn status_is_derived_from_times() {
         let now = dt(1_700_000_000);
-        let mut todo = Todo::new("编码".into(), "".into(), now);
+        let mut todo = Todo::new("编码".into(), now);
 
         todo.started_at = Some(dt(1_700_000_100));
         assert_eq!(todo.status(), TodoStatus::InProgress);
@@ -346,7 +368,7 @@ mod tests {
 
     #[test]
     fn duration_matches_status() {
-        let mut todo = Todo::new("测试".into(), "".into(), dt(1_700_000_000));
+        let mut todo = Todo::new("测试".into(), dt(1_700_000_000));
 
         // 未开始：没有耗时
         assert_eq!(todo.duration(dt(1_700_000_300)), None);
@@ -368,14 +390,14 @@ mod tests {
 
     #[test]
     fn todo_ids_are_unique() {
-        let a = Todo::new("a".into(), "".into(), dt(1));
-        let b = Todo::new("b".into(), "".into(), dt(2));
+        let a = Todo::new("a".into(), dt(1));
+        let b = Todo::new("b".into(), dt(2));
         assert_ne!(a.id, b.id);
     }
 
     #[test]
     fn new_todo_has_no_project() {
-        let todo = Todo::new("无项目".into(), "".into(), dt(1_700_000_000));
+        let todo = Todo::new("无项目".into(), dt(1_700_000_000));
         assert_eq!(todo.project_id, None);
     }
 
@@ -421,7 +443,7 @@ mod tests {
 
     #[test]
     fn new_todo_defaults_have_no_due() {
-        let todo = Todo::new("快捷添加".into(), "".into(), dt(1_700_000_000));
+        let todo = Todo::new("快捷添加".into(), dt(1_700_000_000));
         assert_eq!(todo.due_at, None);
     }
 
@@ -487,6 +509,15 @@ mod tests {
             back.format("%Y-%m-%d %H:%M").to_string(),
             "2026-01-31 18:30"
         );
+    }
+
+    #[test]
+    fn format_due_roundtrips_through_parse() {
+        let due = parse_due("2026-01-31 18:30").unwrap().unwrap();
+        let text = format_due(due);
+        assert_eq!(text, "2026-01-31 18:30");
+        // 回填文本必须可被 parse_due 解析且还原同一时刻（闭环校验）
+        assert_eq!(parse_due(&text).unwrap().unwrap(), due);
     }
 
     #[test]

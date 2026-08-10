@@ -1,7 +1,8 @@
 //! 视图：把应用状态渲染成 iced 元素树。
 //!
-//! 布局：标题栏（含「＋ 添加任务 / ＋ 添加项目」双按钮）+ 任务排序行 + 项目单行栏
-//! （横向滚动芯片）+ 双列任务区；右下角悬浮「已完成 (N)」归档入口。
+//! 布局：标题栏（含「＋ 添加任务 / ＋ 添加项目」双按钮）+ 项目单行栏
+//! （左侧排序下拉 + 横向滚动芯片）+ 任务区（统一标题行：两列计数 + 右上角排序下拉 + 双列）。
+//! 右下角悬浮「已完成 (N)」归档入口。
 //! 每个任务一张卡片：标题、状态徽章、操作按钮、只读属性展示（含项目归属），
 //! 以及创建 / 开始 / 结束三个时间点和（实时）耗时；「编辑」按钮在卡片右下角。
 
@@ -154,9 +155,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if let Some(error) = &app.error {
         body = body.push(text(error.as_str()).size(12).color(ERROR_COLOR));
     }
-
-    // 任务排序选择行（控制两列的组内排序）
-    body = body.push(sort_picker_row(app));
 
     // 项目单行栏（任务列表上方；点击芯片筛选该项目任务）
     body = body.push(project_bar(app));
@@ -559,29 +557,22 @@ fn empty_hint(message: &'static str) -> Element<'static, Message> {
         .into()
 }
 
-/// 任务区排序选择行（右对齐）：控制未开始 / 进行中两列的组内排序。
-fn sort_picker_row(app: &App) -> Element<'_, Message> {
-    row![
-        Space::new().width(Length::Fill),
-        text("排序").size(13).color(MUTED),
-        Space::new().width(6),
-        PickList::new(
-            &SORT_MODES[..],
-            Some(app.sort_mode),
-            Message::SortModeChanged
-        )
-        .text_size(13)
-        .padding([4, 8]),
-    ]
-    .align_y(Alignment::Center)
-    .spacing(6)
+/// 任务排序下拉（任务区统一标题行右上角，无文字标签）：控制未开始 / 进行中两列的组内排序。
+fn task_sort_picker(app: &App) -> Element<'_, Message> {
+    PickList::new(
+        &SORT_MODES[..],
+        Some(app.sort_mode),
+        Message::SortModeChanged,
+    )
+    .text_size(13)
+    .padding([4, 8])
     .into()
 }
 
 // ---------- 项目单行栏 ----------
 
-/// 项目单行栏：项目标签 + 横向滚动芯片（「全部」+ 各项目，按项目排序偏好排序），
-/// 选中具体项目时右端出现「编辑 / 删除」上下文按钮，最右端是项目排序下拉（滚动区外恒可见）。
+/// 项目单行栏：排序下拉（行首，无文字标签）+ 项目标签 + 横向滚动芯片（「全部」+ 各项目，按项目排序偏好排序），
+/// 选中具体项目时右端出现「编辑 / 删除」上下文按钮。
 /// 点击芯片筛选该项目的任务（「全部」恒在最前，显示全部任务）。
 fn project_bar(app: &App) -> Element<'_, Message> {
     // 芯片区：「全部」恒在最前；无项目时灰字提示
@@ -636,15 +627,6 @@ fn project_bar(app: &App) -> Element<'_, Message> {
     }
 
     row![
-        text("项目").size(13).font(BOLD),
-        Space::new().width(10),
-        scrollable(chips)
-            .direction(scrollable::Direction::Horizontal(Default::default()))
-            .width(Length::Fill)
-            .height(Length::Shrink),
-        actions,
-        Space::new().width(6),
-        text("排序").size(11).color(MUTED),
         PickList::new(
             &SORT_MODES[..],
             Some(app.project_sort_mode),
@@ -652,6 +634,13 @@ fn project_bar(app: &App) -> Element<'_, Message> {
         )
         .text_size(12)
         .padding([2, 6]),
+        text("项目").size(13).font(BOLD),
+        Space::new().width(10),
+        scrollable(chips)
+            .direction(scrollable::Direction::Horizontal(Default::default()))
+            .width(Length::Fill)
+            .height(Length::Shrink),
+        actions,
     ]
     .align_y(Alignment::Center)
     .spacing(8)
@@ -891,8 +880,9 @@ fn short_date(dt: DateTime<Utc>) -> String {
 
 // ---------- 任务列表 ----------
 
-/// 双列分组显示：左列=未开始、右列=进行中，各自独立滚动；
-/// 组内按 `sort_mode` 排序（优先级 / 截止日期 / 综合，未设置均排最后）；已完成任务不在此显示（见归档弹窗）。
+/// 双列分组显示：任务区统一标题行（左=未开始计数、中=进行中计数、右上角=任务排序下拉），
+/// 下方双列独立滚动（左=未开始、右=进行中）；组内按 `sort_mode` 排序（优先级 / 截止日期 /
+/// 综合，未设置均排最后）；已完成任务不在此显示（见归档弹窗）。
 fn grouped_columns<'a>(app: &'a App, todos: Vec<&'a Todo>) -> Element<'a, Message> {
     if todos.is_empty() {
         return empty_hint(if app.selected_project.is_some() {
@@ -929,23 +919,39 @@ fn grouped_columns<'a>(app: &'a App, todos: Vec<&'a Todo>) -> Element<'a, Messag
         }
     }
 
-    row![
-        group_column("未开始", "暂无未开始任务", pending, app),
-        Space::new().width(12),
-        group_column("进行中", "暂无进行中任务", in_progress, app),
+    column![
+        // 统一标题行：未开始贴左、进行中居中、排序下拉在右上角（两个 Fill 间隔均分剩余宽度）
+        row![
+            text(format!("未开始 ({})", pending.len()))
+                .size(14)
+                .font(BOLD),
+            Space::new().width(Length::Fill),
+            text(format!("进行中 ({})", in_progress.len()))
+                .size(14)
+                .font(BOLD),
+            Space::new().width(Length::Fill),
+            task_sort_picker(app),
+        ]
+        .align_y(Alignment::Center),
+        Space::new().height(6),
+        row![
+            group_scroll("暂无未开始任务", pending, app),
+            Space::new().width(12),
+            group_scroll("暂无进行中任务", in_progress, app),
+        ]
+        .height(Length::Fill),
     ]
+    .spacing(4)
     .height(Length::Fill)
     .into()
 }
 
-/// 单个分组列：标题 + 计数 + 可滚动卡片列表；空组显示提示。
-fn group_column<'a>(
-    title: &'static str,
+/// 单个分组列的可滚动卡片列表（标题与计数已合并到任务区统一标题行）；空组显示提示。
+fn group_scroll<'a>(
     empty: &'static str,
     todos: Vec<&'a Todo>,
     app: &'a App,
 ) -> Element<'a, Message> {
-    let count = todos.len();
     let list: Element<'_, Message> = if todos.is_empty() {
         empty_hint(empty)
     } else {
@@ -955,15 +961,10 @@ fn group_column<'a>(
             .into()
     };
 
-    column![
-        text(format!("{title} ({count})")).size(14).font(BOLD),
-        Space::new().height(4),
-        scrollable(list).height(Length::Fill),
-    ]
-    .spacing(4)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    scrollable(list)
+        .height(Length::Fill)
+        .width(Length::Fill)
+        .into()
 }
 
 /// 单个任务的卡片：标题 + 可选描述 + 状态徽章 + 操作按钮 + 时间元信息。

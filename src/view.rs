@@ -11,8 +11,8 @@
 use chrono::{DateTime, Duration, Utc};
 use iced::font::Weight;
 use iced::widget::{
-    PickList, Space, button, column, container, mouse_area, opaque, row, scrollable, stack, text,
-    text_input, tooltip,
+    PickList, Space, button, column, container, mouse_area, opaque, pick_list, row, scrollable,
+    stack, text, text_input, tooltip,
 };
 use iced::{Alignment, Background, Border, Color, Element, Font, Length};
 use uuid::Uuid;
@@ -20,16 +20,14 @@ use uuid::Uuid;
 use crate::model::{App, Priority, Project, QuickDue, SortMode, Todo, TodoStatus};
 use crate::update::Message;
 
-/// 次要文本（标签、提示）颜色：中性灰
-const MUTED: Color = Color::from_rgb(0.55, 0.58, 0.62);
+/// 次要文本（标签、提示）颜色：中性灰（深浅主题均衡可读：浅底 3.7:1 / 深底 4.5:1）
+const MUTED: Color = Color::from_rgb(0.49, 0.52, 0.56);
 /// 错误提示：红
 const ERROR_COLOR: Color = Color::from_rgb(0.92, 0.45, 0.45);
 /// 进行中（橙）
 const ACCENT: Color = Color::from_rgb(0.98, 0.70, 0.25);
 /// 已完成（绿）
 const DONE: Color = Color::from_rgb(0.36, 0.78, 0.50);
-/// 下拉菜单卡片宽度（与标题栏分体按钮宽度相近，右缘对齐）
-const ADD_MENU_WIDTH: f32 = 150.0;
 /// 下拉菜单距窗口顶部的偏移：内容区 padding 24 + 标题行高（26px 字号 ≈34）
 /// + 按钮垂直居中（按钮底 ≈55）+ 9px 间隙；字体 / DPI 变化时在此校准
 const ADD_MENU_TOP: f32 = 64.0;
@@ -112,13 +110,6 @@ const BTN_CARD: iced::Padding = iced::Padding {
     right: 14.0,
     bottom: 6.0,
     left: 14.0,
-};
-/// 按钮规格：下拉菜单项 [8, 12]
-const BTN_MENU: iced::Padding = iced::Padding {
-    top: 8.0,
-    right: 12.0,
-    bottom: 8.0,
-    left: 12.0,
 };
 /// 按钮规格：右下角「已完成」按钮 [8, 14]
 const BTN_FAB: iced::Padding = iced::Padding {
@@ -218,8 +209,9 @@ fn priority_picker<'a>(
         Some(PriorityChoice::of(selected)),
         move |choice| on_select(choice.value),
     )
-    .text_size(13)
-    .padding([4, 8])
+    .text_size(FONT_BODY)
+    .padding([SPACE_XS, SPACE_M])
+    .style(pick_list_style)
     .width(Length::Fill)
     .into()
 }
@@ -230,6 +222,30 @@ fn priority_color(priority: Priority) -> Color {
         Priority::High => ERROR_COLOR,
         Priority::Medium => ACCENT,
         Priority::Low => MUTED,
+    }
+}
+
+/// 下拉选择器样式：与设计令牌统一——弱色底 + 卡片圆角 + 主题描边；悬停 / 展开时底色加深。
+/// 深浅主题均取 `extended_palette()` 自适应。
+fn pick_list_style(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
+    let background = theme.extended_palette().background;
+    let base = pick_list::Style {
+        text_color: background.base.text,
+        placeholder_color: background.base.text,
+        handle_color: MUTED,
+        background: background.weak.color.into(),
+        border: Border {
+            color: background.strong.color,
+            width: 1.0,
+            radius: RADIUS_CARD.into(),
+        },
+    };
+    match status {
+        pick_list::Status::Active => base,
+        pick_list::Status::Hovered | pick_list::Status::Opened { .. } => pick_list::Style {
+            background: background.strong.color.into(),
+            ..base
+        },
     }
 }
 
@@ -444,8 +460,9 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
             move |choice| { Message::DialogProjectChanged(choice.id) },
         )
         .placeholder("无项目")
-        .text_size(13)
-        .padding([4, 8])
+        .text_size(FONT_BODY)
+        .padding([SPACE_XS, SPACE_M])
+        .style(pick_list_style)
         .width(Length::Fill),
         quick_btn,
     ]
@@ -481,8 +498,9 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
             Message::DialogQuickDue
         )
         .placeholder("快捷时间")
-        .text_size(13)
-        .padding([4, 8]),
+        .text_size(FONT_BODY)
+        .padding([SPACE_XS, SPACE_M])
+        .style(pick_list_style),
     ]
     .spacing(SPACE_S)
     .align_y(Alignment::Center);
@@ -741,8 +759,9 @@ fn task_sort_picker(app: &App) -> Element<'_, Message> {
         Some(app.sort_mode),
         Message::SortModeChanged,
     )
-    .text_size(13)
-    .padding([4, 8])
+    .text_size(FONT_BODY)
+    .padding([SPACE_XS, SPACE_M])
+    .style(pick_list_style)
     .into()
 }
 
@@ -809,8 +828,9 @@ fn project_bar(app: &App) -> Element<'_, Message> {
             Some(app.project_sort_mode),
             Message::ProjectSortModeChanged,
         )
-        .text_size(12)
-        .padding([2, 6]),
+        .text_size(FONT_BODY)
+        .padding([SPACE_XS, SPACE_M])
+        .style(pick_list_style),
         text("项目").size(FONT_BODY).font(BOLD),
         Space::new().width(SPACE_M),
         scrollable(chips)
@@ -1002,23 +1022,15 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
 
 // ---------- 标题栏添加下拉菜单 ----------
 
-/// 标题栏分体按钮的下拉菜单卡片：右上角悬浮（无压暗），含「＋ 添加项目」入口。
-/// 菜单项与主按钮「＋ 添加任务」同款 primary 样式（视觉一致）。
+/// 标题栏分体按钮的下拉菜单：右上角悬浮（无压暗、无卡片包裹），
+/// 「＋ 添加项目」与主按钮「＋ 添加任务」同款 primary 样式、同尺寸。
 /// 点击菜单项打开项目弹窗（弹窗互斥逻辑不变，update 层自动收起菜单）。
 fn add_menu_card() -> Element<'static, Message> {
-    container(
-        column![
-            button(text("＋ 添加项目").size(FONT_BODY))
-                .on_press(Message::OpenProjectDialog)
-                .style(button::primary)
-                .padding(BTN_MENU)
-                .width(Length::Fill)
-        ]
-        .padding(SPACE_XS),
-    )
-    .width(Length::Fixed(ADD_MENU_WIDTH))
-    .style(card_style)
-    .into()
+    button(text("＋ 添加项目").size(FONT_BODY))
+        .on_press(Message::OpenProjectDialog)
+        .style(button::primary)
+        .padding(BTN_MEDIUM)
+        .into()
 }
 
 // ---------- 右下角状态簇 ----------
@@ -1380,8 +1392,9 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
             move |choice| Message::EditProjectChanged(choice.id),
         )
         .placeholder("无项目")
-        .text_size(13)
-        .padding([4, 8])
+        .text_size(FONT_BODY)
+        .padding([SPACE_XS, SPACE_M])
+        .style(pick_list_style)
         .width(Length::Fill),
     ]
     .spacing(SPACE_S)
@@ -1416,8 +1429,9 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
             Message::EditQuickDue,
         )
         .placeholder("快捷时间")
-        .text_size(13)
-        .padding([4, 8]),
+        .text_size(FONT_BODY)
+        .padding([SPACE_XS, SPACE_M])
+        .style(pick_list_style),
     ]
     .spacing(SPACE_S)
     .align_y(Alignment::Center);

@@ -6,7 +6,7 @@ description: Iced Todos 桌面待办应用 —— Rust + iced 0.14（Elm 架构�
 # AGENTS.md
 
 本文件为 AI 编码代理（Vibe Coding）提供项目上下文、架构约定与开发约束。
-**改动任何行为之前，请先阅读 `docs/方案.md`（设计文档）与本文档。**
+**改动任何行为之前，请先阅读 `docs/需求与概要设计.md`（设计文档）与本文档。**
 
 ## 1. 项目概览
 
@@ -54,7 +54,7 @@ src/
 ├── view.rs     视图：项目侧边栏（可收放）+ 任务区（输入行、任务卡片/编辑模式、时间元信息）+ 弹窗（任务/项目添加）
 ├── storage.rs  持久化：异步 JSON 读写（Store = 任务 + 项目，兼容旧格式）
 docs/
-└── 方案.md     设计文档 —— 需求 R1-R15、架构图、验收标准，改行为前必读
+└── 需求与概要设计.md     需求与概要设计文档 —— 需求 R1-R27 + 非功能 N1-N7、架构图、验收标准，改行为前必读
 ```
 
 数据流（Elm 架构）：**视图产生 Message → update 更新状态 → 视图重新渲染**；
@@ -108,8 +108,8 @@ docs/
 
 ## 8. 开发工作流（Vibe Coding 指引）
 
-1. **先读文档**：涉及行为/数据模型改动时，先读 `docs/方案.md`，设计与文档冲突时先更新文档再改代码；新功能先编写计划文档到 `.pi/plan/` 再实现。
+1. **先读文档**：涉及行为/数据模型改动时，先读 `docs/需求与概要设计.md`，设计与文档冲突时先更新文档再改代码；新功能先编写计划文档到 `.pi/plan/` 再实现。
 2. **善用代码索引**：本仓库已配置 CodeGraph（`codegraph_search` / `codegraph_explore` / `codegraph_callers` 等），查符号与调用关系优先用它们，其次才 grep/read。
 3. **小步提交（提交门禁）**：功能完成后**必须**依次通过 `cargo fmt`（无差异）、`cargo clippy --all-targets`（零警告）、`cargo test`（全绿）**才能提交**；未通过门禁不得 commit，也不得用 `--no-verify` 绕过。提交信息用中文或英文均可，使用 Conventional Commits 风格。
 4. **变更闭环**：改代码 → 补测试 → `cargo fmt` → `cargo test` → `cargo clippy --all-targets` → `cargo run` 手动验证 UI 行为。
-5. **验收对照**：功能完成时对照 `docs/方案.md` 第 8 节验收标准逐条核对。
+5. **验收对照**：功能完成时对照 `docs/需求与概要设计.md` 第 5 节验收标准逐条核对。

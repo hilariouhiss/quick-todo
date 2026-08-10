@@ -1,3 +1,4 @@
 /target
 .mcp.json
 /.pi/
+/.pi-subagents/

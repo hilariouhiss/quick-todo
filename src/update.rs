@@ -12,7 +12,7 @@ use crate::model::{
     AddDialog, App, Priority, Project, ProjectDialog, ProjectEdit, QuickDue, SortMode, Todo,
     TodoEdit, TodoStatus, format_due, parse_datetime,
 };
-use crate::storage::{self, Store};
+use crate::storage::{self, Op, Store};
 use crate::view::{DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID, PROJECT_EDIT_NAME_ID};
 
 /// 应用内所有可触发的消息。
@@ -120,7 +120,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // 只有"未开始"的任务可以开始
                 if todo.status() == TodoStatus::Pending {
                     todo.started_at = Some(app.now);
-                    return persist(app);
+                    return persist(Op::UpdateTodo(todo.clone()));
                 }
             }
         }
@@ -130,7 +130,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // 只有"进行中"的任务可以完成
                 if todo.status() == TodoStatus::InProgress {
                     todo.finished_at = Some(app.now);
-                    return persist(app);
+                    return persist(Op::UpdateTodo(todo.clone()));
                 }
             }
         }
@@ -139,7 +139,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let before = app.todos.len();
             app.todos.retain(|todo| todo.id != id);
             if app.todos.len() != before {
-                return persist(app);
+                return persist(Op::DeleteTodo(id));
             }
         }
 
@@ -156,15 +156,15 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::Tick(now) => app.now = now,
 
         Message::SortModeChanged(mode) => {
-            // 排序偏好持久化：切换即落盘
+            // 排序偏好持久化：切换即落盘（settings.json 整文件覆写）
             app.sort_mode = mode;
-            return persist(app);
+            return persist_settings(app);
         }
 
         Message::ProjectSortModeChanged(mode) => {
-            // 排序偏好持久化：切换即落盘
+            // 排序偏好持久化：切换即落盘（settings.json 整文件覆写）
             app.project_sort_mode = mode;
-            return persist(app);
+            return persist_settings(app);
         }
 
         Message::OpenProjectDialog => {
@@ -250,9 +250,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 } else {
                     Project::new_full(name, dialog.priority, started_at, finished_at, app.now)
                 };
-            app.projects.push(project);
+            app.projects.push(project.clone());
             app.project_dialog = None;
-            return persist(app);
+            return persist(Op::InsertProject(project));
         }
 
         Message::OpenCompletedDialog => {
@@ -357,7 +357,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 project.priority = edit.priority;
                 project.started_at = started_at;
                 project.finished_at = finished_at;
-                return persist(app);
+                return persist(Op::UpdateProject(project.clone()));
             }
             // 项目已被删除：退出编辑态（无副作用）
         }
@@ -388,7 +388,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 {
                     app.project_edit = None;
                 }
-                return persist(app);
+                return persist(Op::DeleteProject(id));
             }
         }
 
@@ -516,9 +516,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.now,
                 )
             };
-            app.todos.insert(0, todo);
+            app.todos.insert(0, todo.clone());
             app.add_dialog = None;
-            return persist(app);
+            return persist(Op::InsertTodo(todo));
         }
 
         Message::EditTodo(id) => {
@@ -623,7 +623,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             todo.priority = edit.priority;
             todo.project_id = edit.project_id;
             todo.due_at = due_at;
-            return persist(app);
+            return persist(Op::UpdateTodo(todo.clone()));
         }
     }
 
@@ -631,20 +631,17 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 }
 
 /// 把当前任务、项目与排序偏好序列化并异步写入磁盘（fire-and-forget）。
-fn persist(app: &App) -> Task<Message> {
-    let store = Store {
-        todos: app.todos.clone(),
-        projects: app.projects.clone(),
-        sort_mode: app.sort_mode,
-        project_sort_mode: app.project_sort_mode,
-    };
-    match serde_json::to_string_pretty(&store) {
-        Ok(json) => Task::perform(storage::save(json), Message::Saved),
-        Err(error) => {
-            eprintln!("序列化数据失败: {error}");
-            Task::none()
-        }
-    }
+/// 派发一次数据变更（增量写盘）：每个 Op 携带完整行状态，单事务执行。
+fn persist(op: Op) -> Task<Message> {
+    Task::perform(storage::apply(op), Message::Saved)
+}
+
+/// 派发排序偏好写盘：两个值都取自 app 当前状态，整文件覆写（无读-改-写竞态）。
+fn persist_settings(app: &App) -> Task<Message> {
+    Task::perform(
+        storage::save_settings(app.sort_mode, app.project_sort_mode),
+        Message::Saved,
+    )
 }
 
 #[cfg(test)]

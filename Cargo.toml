@@ -2,14 +2,14 @@
 name = "quick-todo"
 version = "0.1.0"
 edition = "2024"
-description = "Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构），带时间追踪与 JSON 持久化"
+description = "Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构），带时间追踪与 SQLite 持久化"
 
 [dependencies]
 iced = { version = "0.14", features = ["tokio", "debug", "time-travel"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-uuid = { version = "1", features = ["v7", "fast-rng", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v7", "fast-rng"] }
+chrono = "0.4"
 
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -17,8 +17,8 @@ tokio = { version = "1", features = [
     "fs",
     "time",
 ] }
-directories = "6"
 tracing-subscriber = "0.3"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [dev-dependencies]
 iced_test = "0.14"

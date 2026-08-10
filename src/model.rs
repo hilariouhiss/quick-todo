@@ -31,7 +31,7 @@ impl TodoStatus {
 }
 
 /// 优先级：低 / 中 / 高（派生 Ord，排序用；`Option` 的 `None` = 未设置）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Priority {
     /// 低
     Low,
@@ -94,7 +94,7 @@ pub type CombinedOrderKey = (
 /// - `finished_at`：结束时间（点击"完成"时记录）
 ///
 /// 时间统一以 UTC 存储，展示时再转换为本地时区。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Todo {
     pub id: Uuid,
     pub title: String,
@@ -189,7 +189,7 @@ impl Todo {
 /// - `priority`：可选优先级（`None` = 未设置，行内不显示圆点、排序排最后）
 /// - `started_at` / `finished_at`：可选起止时间（`None` = 未设置）
 /// - `created_at`：创建时间（创建时自动记录，不可为空）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Project {
     pub id: Uuid,
     pub name: String,
@@ -509,20 +509,6 @@ mod tests {
         // 快捷添加仅标题：描述恒为空串（描述只经弹窗 new_full 填写）
         let todo = Todo::new("写方案".into(), dt(1_700_000_000));
         assert!(todo.description.is_empty());
-    }
-
-    #[test]
-    fn json_missing_description_is_rejected() {
-        // 严格 schema（开发阶段不兼容旧版数据）：缺必填字段（非 Option）应反序列化失败；
-        // Option 字段缺省等同 null 属 serde 固有语义，不视为兼容层
-        let json = r#"{
-            "id": "0195c7e0-0000-7000-8000-000000000001",
-            "title": "旧任务",
-            "created_at": "2026-01-01T10:00:00Z",
-            "started_at": null,
-            "finished_at": null
-        }"#;
-        assert!(serde_json::from_str::<Todo>(json).is_err());
     }
 
     #[test]

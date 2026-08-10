@@ -30,10 +30,6 @@ const SIDEBAR_WIDTH: f32 = 220.0;
 /// 弹窗标题输入框的 widget Id（打开弹窗时聚焦用）
 pub(crate) const DIALOG_TITLE_ID: iced::widget::Id = iced::widget::Id::new("add-dialog-title");
 
-/// 任务弹窗快速新建项目输入框的 widget Id（展开输入行时聚焦用）
-pub(crate) const ADD_DIALOG_QUICK_PROJECT_ID: iced::widget::Id =
-    iced::widget::Id::new("add-dialog-quick-project");
-
 /// 项目弹窗名称输入框的 widget Id（打开弹窗时聚焦用）
 pub(crate) const PROJECT_DIALOG_NAME_ID: iced::widget::Id =
     iced::widget::Id::new("add-project-dialog-name");
@@ -194,11 +190,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .center_x(Length::Fill);
 
     // 弹窗打开时：内容之上叠加 遮罩（点击关闭）+ 弹窗卡片（不透明，防穿透）
-    // 任务 / 项目 / 归档弹窗互斥（update 层保证），共用同一叠加层
-    let dialog = if app.add_dialog.is_some() {
-        Some(add_dialog_card(app))
-    } else if app.project_dialog.is_some() {
+    // 任务 / 项目 / 归档弹窗互斥；任务弹窗内「＋ 新建」会叠加打开项目弹窗（顶层）
+    // ——因此项目弹窗优先渲染，Esc / 遮罩关闭后返回任务弹窗（update 层保证）
+    let dialog = if app.project_dialog.is_some() {
         Some(project_dialog_card(app))
+    } else if app.add_dialog.is_some() {
+        Some(add_dialog_card(app))
     } else if app.show_completed {
         Some(completed_dialog_card(app))
     } else {
@@ -263,16 +260,10 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         .padding(10);
 
     // 所属项目："无项目" + 全部项目（与编辑模式共用选项包装）+ 快速新建入口
-    let quick_btn = button(
-        text(if dialog.quick_project_open {
-            "收起"
-        } else {
-            "＋ 新建"
-        })
-        .size(13),
-    )
-    .on_press(Message::ToggleQuickProject)
-    .padding([4, 8]);
+    // （点击「＋ 新建」弹出与侧边栏相同的新建项目弹窗，创建成功自动选中）
+    let quick_btn = button(text("＋ 新建").size(13))
+        .on_press(Message::OpenQuickProjectDialog)
+        .padding([4, 8]);
     let project_picker = row![
         text("所属项目")
             .size(13)
@@ -291,37 +282,6 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     ]
     .spacing(6)
     .align_y(Alignment::Center);
-
-    // 快速新建项目输入行（仅展开时渲染）：名称（必填）+ 创建 / 取消
-    let mut quick_project_row: Option<Element<'_, Message>> = None;
-    if dialog.quick_project_open {
-        let name_input = text_input("新项目名称（必填）", &dialog.quick_project_name)
-            .id(ADD_DIALOG_QUICK_PROJECT_ID)
-            .on_input(Message::QuickProjectNameChanged)
-            .on_submit(Message::SubmitQuickProject)
-            .padding(10);
-        let create_btn = button(text("创建").size(13))
-            .on_press_maybe(
-                (!dialog.quick_project_name.trim().is_empty())
-                    .then_some(Message::SubmitQuickProject),
-            )
-            .style(button::primary)
-            .padding([4, 10]);
-        let cancel_btn = button(text("取消").size(13))
-            .on_press(Message::ToggleQuickProject)
-            .padding([4, 10]);
-        quick_project_row = Some(
-            row![
-                Space::new().width(78.0), // 与「所属项目」标签对齐（72 + 间距 6）
-                name_input,
-                create_btn,
-                cancel_btn,
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center)
-            .into(),
-        );
-    }
 
     // 优先级（可选）：下拉
     let priority_row = row![
@@ -370,12 +330,6 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     ]
     .spacing(10);
 
-    if let Some(quick_row) = quick_project_row {
-        form = form.push(quick_row);
-    }
-    if let Some(notice) = &dialog.quick_project_notice {
-        form = form.push(text(notice.as_str()).size(12).color(ERROR_COLOR));
-    }
     if let Err(hint) = &dialog.due_parsed {
         form = form.push(text(hint.as_str()).size(12).color(ERROR_COLOR));
     }

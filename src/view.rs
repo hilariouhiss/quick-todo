@@ -258,7 +258,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .on_press(Message::CycleThemeMode)
                 .style(button::text)
                 .padding(BTN_SMALL),
-            text("点击切换主题（跟随系统 / 浅色 / 深色）"),
+            text("点击切换主题（跟随系统 / 浅色 / 深色）").size(FONT_SMALL),
             tooltip::Position::Bottom,
         ),
         Space::new().width(SPACE_M),
@@ -851,7 +851,12 @@ fn project_chip<'a>(
 
     // 起止时间悬停提示（仅设置了时间的项目；「全部」无）
     match project_period(app, id) {
-        Some(period) => tooltip(chip, text(period), tooltip::Position::Bottom).into(),
+        Some(period) => tooltip(
+            chip,
+            text(period).size(FONT_SMALL),
+            tooltip::Position::Bottom,
+        )
+        .into(),
         None => chip.into(),
     }
 }
@@ -998,17 +1003,18 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
 // ---------- 标题栏添加下拉菜单 ----------
 
 /// 标题栏分体按钮的下拉菜单卡片：右上角悬浮（无压暗），含「＋ 添加项目」入口。
+/// 菜单项与主按钮「＋ 添加任务」同款 primary 样式（视觉一致）。
 /// 点击菜单项打开项目弹窗（弹窗互斥逻辑不变，update 层自动收起菜单）。
 fn add_menu_card() -> Element<'static, Message> {
     container(
         column![
             button(text("＋ 添加项目").size(FONT_BODY))
                 .on_press(Message::OpenProjectDialog)
-                .style(button::text)
+                .style(button::primary)
                 .padding(BTN_MENU)
                 .width(Length::Fill)
         ]
-        .padding(4),
+        .padding(SPACE_XS),
     )
     .width(Length::Fixed(ADD_MENU_WIDTH))
     .style(card_style)

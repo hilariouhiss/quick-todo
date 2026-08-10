@@ -15,7 +15,7 @@ description: Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构�
 - 添加 / 开始 / 完成 / 删除任务，每个任务记录**创建 / 开始 / 结束**三个时间点，可带可选**描述**
 - 任务卡片默认**只读**展示全部属性；点击「编辑」进入编辑模式（即"当前任务"），可修改标题 / 描述 / 项目 / 截止时间
 - 项目侧边栏可**收起 / 展开**（纯 UI 状态，不持久化，启动默认收起）
-- 项目通过「＋ 添加项目」**弹窗**创建（名称必填），可带可选**起止时间**（侧边栏小字展示，内联编辑可改）
+- 项目通过「＋ 添加项目」**弹窗**创建（名称必填），可带可选**起止时间**（侧边栏小字展示，内联编辑可改）；**任务弹窗内可快速新建项目**（仅名称，创建后自动选中）
 - 任务区**双列分组**：左=未开始、右=进行中（组内按截止时间排序）；已完成经侧边栏按钮弹窗归档；任务添加统一走「＋ 添加任务」弹窗
 - 任务 / 项目可带可选**优先级**（无/低/中/高）；任务与项目列表可切换排序（优先级 / 截止日期 / 综合），偏好**持久化**到数据文件
 - 进行中任务显示**每秒实时**刷新耗时
@@ -69,8 +69,8 @@ docs/
 3. **时间统一 UTC 存储**（`DateTime<Utc>`），仅在 view 层用 `chrono::Local` 格式化展示。
 4. **持久化 fire-and-forget**：每次数据变更派发一个 `storage::Op`（携带完整行状态），经 `Task::perform(storage::apply, Message::Saved)` 在**单事务**内执行对应 SQL；排序偏好经 `storage::save_settings` 整文件覆写 `settings.json`（无读-改-写）。`Saved` 成功消息静默，失败写入 `app.error`。增量写、无写队列；rusqlite 同步 API 一律经 `spawn_blocking` 包裹，不阻塞 UI 线程。
 5. **数据不兼容旧版本**（开发阶段破坏性更新）：任务 / 项目存 SQLite 单文件（`quick-todo.db`，可执行文件同目录），schema 变更即破坏性更新——旧库不兼容直接报错，不做自动迁移；排序偏好存独立 `settings.json`（缺省「综合」）。两个文件缺失视为空数据。
-6. **项目语义**：项目名 trim 后非空且不重名；项目添加走弹窗（`OpenProjectDialog` / `SubmitProjectDialog`），可带可选起止时间（`Project.started_at` / `finished_at`；**开始必须早于结束**）；编辑走侧边栏**内联表单**（`StartEditProject` / `SaveEditProject`，名称 + 起止时间可改，**重名校验排除自身**）；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
-7. **新任务插在最前**（`todos.insert(0, ...)`）；**任务添加统一走「＋ 添加任务」弹窗**（`SubmitAddDialog`，`App.input` / 快捷输入行已移除）；标题 / 描述 / 项目名输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）；优先级（`Option<Priority>`）在弹窗 / 编辑表单设置，未设置不显示徽章、排序排最后；弹窗校验不过（空白标题 / 截止时间格式非法 / 项目不存在）时弹窗保持打开、输入保留；时间取自 `app.now`。
+6. **项目语义**：项目名 trim 后非空且不重名；项目添加走弹窗（`OpenProjectDialog` / `SubmitProjectDialog`，完整属性），也可在**任务弹窗内快速新建**（`ToggleQuickProject` / `QuickProjectNameChanged` / `SubmitQuickProject`，仅名称：空白静默保持；**重名自动选中已有项目并红字提示、不落盘**；通过则创建并自动选中、收起输入行，创建成功才落盘 `Op::InsertProject`，焦点回落标题框）；可带可选起止时间（`Project.started_at` / `finished_at`；**开始必须早于结束**）；编辑走侧边栏**内联表单**（`StartEditProject` / `SaveEditProject`，名称 + 起止时间可改，**重名校验排除自身**）；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
+7. **新任务插在最前**（`todos.insert(0, ...)`）；**任务添加统一走「＋ 添加任务」弹窗**（`SubmitAddDialog`，`App.input` / 快捷输入行已移除）；标题 / 描述 / 项目名输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）；优先级（`Option<Priority>`）在弹窗 / 编辑表单设置，未设置不显示徽章、排序排最后；弹窗校验不过（空白标题 / 截止时间格式非法 / 项目不存在）时弹窗保持打开、输入保留；时间取自 `app.now`。**任务弹窗的快速新建项目状态**（`AddDialog.quick_project_open` / `quick_project_name` / `quick_project_notice`）是纯 UI 状态：展开 / 输入 / 收起不落盘，仅创建成功落盘。
 8. **侧边栏收放、弹窗表单、归档开关与编辑表单是纯 UI 状态**（`App.sidebar_visible` / `App.add_dialog` / `App.project_dialog` / `App.show_completed` / `App.project_edit` / `App.todo_edit`）：只存内存、**不参与持久化**，启动默认收起 / 关闭 / 无编辑；`ToggleSidebar`、各弹窗与编辑表单的打开/关闭/输入变化均不触发落盘（`SubmitAddDialog` 创建成功、`SubmitProjectDialog` 创建成功、`SaveEditProject` / `SaveEditTodo` 保存成功才落盘）；任务 / 项目 / 归档三个弹窗**互斥**（打开一个关闭其余）。
     **例外：排序偏好持久化**（`App.sort_mode` / `App.project_sort_mode`，R22/R24）——存独立 `settings.json`（`storage::save_settings`，不入 SQLite）、启动经 `Loaded` 恢复，`SortModeChanged` / `ProjectSortModeChanged` 切换即触发落盘。
 9. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。

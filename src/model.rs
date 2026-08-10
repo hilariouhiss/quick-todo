@@ -261,6 +261,12 @@ pub struct AddDialog {
     /// 截止时间的实时解析结果：
     /// `Ok(None)` = 留空；`Ok(Some)` = 解析成功；`Err` = 格式错误提示
     pub due_parsed: Result<Option<DateTime<Utc>>, String>,
+    /// 快速新建项目输入行是否展开（纯 UI 状态，不持久化）
+    pub quick_project_open: bool,
+    /// 快速新建项目名称输入（纯 UI 状态）
+    pub quick_project_name: String,
+    /// 快速新建提示（如「项目名已存在，已自动选中该项目」；纯 UI 状态）
+    pub quick_project_notice: Option<String>,
 }
 
 impl Default for AddDialog {
@@ -272,6 +278,9 @@ impl Default for AddDialog {
             project_id: None,
             due_input: String::new(),
             due_parsed: Ok(None),
+            quick_project_open: false,
+            quick_project_name: String::new(),
+            quick_project_notice: None,
         }
     }
 }

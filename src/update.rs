@@ -13,7 +13,9 @@ use crate::model::{
     TodoEdit, TodoStatus, format_due, parse_datetime,
 };
 use crate::storage::{self, Op, Store};
-use crate::view::{DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID, PROJECT_EDIT_NAME_ID};
+use crate::view::{
+    ADD_DIALOG_QUICK_PROJECT_ID, DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID, PROJECT_EDIT_NAME_ID,
+};
 
 /// 应用内所有可触发的消息。
 #[derive(Debug, Clone)]
@@ -108,6 +110,12 @@ pub enum Message {
     DialogDueChanged(String),
     /// 弹窗：快捷时间下拉选择（回填到截止时间输入框）
     DialogQuickDue(QuickDue),
+    /// 弹窗：展开 / 收起快速新建项目输入行（收起时清空输入与提示）
+    ToggleQuickProject,
+    /// 弹窗：快速新建项目名称输入变化
+    QuickProjectNameChanged(String),
+    /// 弹窗：快速新建项目提交（回车 / 点「创建」）
+    SubmitQuickProject,
     /// 弹窗：点击"创建"/回车提交（校验通过后创建任务并落盘）
     SubmitAddDialog,
 }
@@ -444,7 +452,58 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
             if let Some(dialog) = &mut app.add_dialog {
                 dialog.project_id = project_id;
+                dialog.quick_project_notice = None;
             }
+        }
+
+        Message::ToggleQuickProject => {
+            if let Some(dialog) = &mut app.add_dialog {
+                dialog.quick_project_open = !dialog.quick_project_open;
+                dialog.quick_project_name.clear();
+                dialog.quick_project_notice = None;
+                if dialog.quick_project_open {
+                    return iced::widget::operation::focus(ADD_DIALOG_QUICK_PROJECT_ID);
+                }
+            }
+        }
+
+        Message::QuickProjectNameChanged(name) => {
+            if let Some(dialog) = &mut app.add_dialog {
+                dialog.quick_project_name = name;
+                dialog.quick_project_notice = None;
+            }
+        }
+
+        Message::SubmitQuickProject => {
+            // 防御：弹窗未打开或输入行收起时不产生任何副作用
+            let Some(dialog) = app.add_dialog.as_mut() else {
+                return Task::none();
+            };
+            if !dialog.quick_project_open {
+                return Task::none();
+            }
+            let name = dialog.quick_project_name.trim().to_owned();
+            if name.is_empty() {
+                return Task::none();
+            }
+            // 重名：自动选中已有项目（不落盘——无数据变更），提示并收起
+            if let Some(existing) = app.projects.iter().find(|p| p.name == name) {
+                dialog.project_id = Some(existing.id);
+                dialog.quick_project_open = false;
+                dialog.quick_project_name.clear();
+                dialog.quick_project_notice = Some("项目名已存在，已自动选中该项目".to_owned());
+                return iced::widget::operation::focus(DIALOG_TITLE_ID);
+            }
+            // 创建新项目（时间取自 app.now），选中并收起；创建成功才落盘
+            let project = Project::new(name, app.now);
+            app.projects.push(project.clone());
+            dialog.project_id = Some(project.id);
+            dialog.quick_project_open = false;
+            dialog.quick_project_name.clear();
+            return Task::batch([
+                persist(Op::InsertProject(project)),
+                iced::widget::operation::focus(DIALOG_TITLE_ID),
+            ]);
         }
 
         Message::DialogPriorityChanged(priority) => {
@@ -647,6 +706,7 @@ fn persist_settings(app: &App) -> Task<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn app_with(now: DateTime<Utc>) -> App {
         App {
@@ -1603,5 +1663,160 @@ mod tests {
         let mut app = App::default();
         let _ = update(&mut app, Message::SaveEditTodo);
         assert!(app.todos.is_empty());
+    }
+
+    // ---------- 任务弹窗快速新建项目 ----------
+
+    #[test]
+    fn toggle_quick_project_flips_open_and_clears_input() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+
+        // 展开并输入名称
+        let _ = update(&mut app, Message::ToggleQuickProject);
+        let _ = update(&mut app, Message::QuickProjectNameChanged("新项目".into()));
+        let dialog = app.add_dialog.as_ref().unwrap();
+        assert!(dialog.quick_project_open);
+        assert_eq!(dialog.quick_project_name, "新项目");
+
+        // 收起：输入与提示被清空
+        let _ = update(&mut app, Message::ToggleQuickProject);
+        let dialog = app.add_dialog.as_ref().unwrap();
+        assert!(!dialog.quick_project_open);
+        assert!(dialog.quick_project_name.is_empty());
+    }
+
+    #[test]
+    fn quick_project_name_changed_updates_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::ToggleQuickProject);
+
+        let _ = update(&mut app, Message::QuickProjectNameChanged("读书".into()));
+        assert_eq!(app.add_dialog.as_ref().unwrap().quick_project_name, "读书");
+    }
+
+    #[test]
+    fn submit_quick_project_creates_project_and_selects() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let mut app = app_with(now);
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::ToggleQuickProject);
+        let _ = update(&mut app, Message::QuickProjectNameChanged(" 读书 ".into()));
+
+        let _ = update(&mut app, Message::SubmitQuickProject);
+
+        assert_eq!(app.projects.len(), 1);
+        let project = &app.projects[0];
+        assert_eq!(project.name, "读书"); // trim 后创建
+        assert_eq!(project.created_at, app.now); // 时间取自 app.now
+        let dialog = app.add_dialog.as_ref().unwrap();
+        assert_eq!(dialog.project_id, Some(project.id)); // 自动选中
+        assert!(!dialog.quick_project_open); // 收起
+        assert!(dialog.quick_project_name.is_empty());
+        assert!(dialog.quick_project_notice.is_none());
+    }
+
+    #[test]
+    fn submit_quick_project_blank_name_keeps_open() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::ToggleQuickProject);
+        let _ = update(&mut app, Message::QuickProjectNameChanged("   ".into()));
+
+        let _ = update(&mut app, Message::SubmitQuickProject);
+
+        assert!(app.projects.is_empty()); // 无新增
+        let dialog = app.add_dialog.as_ref().unwrap();
+        assert!(dialog.quick_project_open); // 保持展开
+        assert_eq!(dialog.quick_project_name, "   "); // 输入保留
+    }
+
+    #[test]
+    fn submit_quick_project_duplicate_selects_existing() {
+        let mut app = App::default();
+        let pid = add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::ToggleQuickProject);
+        let _ = update(&mut app, Message::QuickProjectNameChanged("工作".into()));
+
+        let _ = update(&mut app, Message::SubmitQuickProject);
+
+        assert_eq!(app.projects.len(), 1); // 不新增
+        let dialog = app.add_dialog.as_ref().unwrap();
+        assert_eq!(dialog.project_id, Some(pid)); // 自动选中已有项目
+        assert!(!dialog.quick_project_open); // 收起
+        assert!(dialog.quick_project_name.is_empty());
+        assert_eq!(
+            dialog.quick_project_notice.as_deref(),
+            Some("项目名已存在，已自动选中该项目")
+        );
+    }
+
+    #[test]
+    fn submit_quick_project_without_dialog_is_noop() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::SubmitQuickProject);
+        assert!(app.projects.is_empty());
+    }
+
+    #[test]
+    fn submit_quick_project_while_collapsed_is_noop() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        // 输入行未展开时提交：无副作用
+        let _ = update(&mut app, Message::SubmitQuickProject);
+        assert!(app.projects.is_empty());
+        assert!(app.add_dialog.as_ref().unwrap().project_id.is_none());
+    }
+
+    #[test]
+    fn quick_project_notice_cleared_on_new_input() {
+        let mut app = App::default();
+        add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::ToggleQuickProject);
+        let _ = update(&mut app, Message::QuickProjectNameChanged("工作".into()));
+        let _ = update(&mut app, Message::SubmitQuickProject);
+        assert!(
+            app.add_dialog
+                .as_ref()
+                .unwrap()
+                .quick_project_notice
+                .is_some()
+        );
+
+        // 重新展开并输入：提示清除
+        let _ = update(&mut app, Message::ToggleQuickProject);
+        let _ = update(&mut app, Message::QuickProjectNameChanged("新".into()));
+        assert!(
+            app.add_dialog
+                .as_ref()
+                .unwrap()
+                .quick_project_notice
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn submit_add_dialog_after_quick_project_creates_task_with_new_project() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let mut app = app_with(now);
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::ToggleQuickProject);
+        let _ = update(
+            &mut app,
+            Message::QuickProjectNameChanged("快速项目".into()),
+        );
+        let _ = update(&mut app, Message::SubmitQuickProject);
+        let project_id = app.projects[0].id;
+
+        // 继续填写任务并提交 → 任务归属快速新建的项目
+        let _ = update(&mut app, Message::DialogTitleChanged("写方案".into()));
+        let _ = update(&mut app, Message::SubmitAddDialog);
+
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].project_id, Some(project_id));
+        assert!(app.add_dialog.is_none()); // 弹窗关闭
     }
 }

@@ -30,6 +30,10 @@ const SIDEBAR_WIDTH: f32 = 220.0;
 /// 弹窗标题输入框的 widget Id（打开弹窗时聚焦用）
 pub(crate) const DIALOG_TITLE_ID: iced::widget::Id = iced::widget::Id::new("add-dialog-title");
 
+/// 任务弹窗快速新建项目输入框的 widget Id（展开输入行时聚焦用）
+pub(crate) const ADD_DIALOG_QUICK_PROJECT_ID: iced::widget::Id =
+    iced::widget::Id::new("add-dialog-quick-project");
+
 /// 项目弹窗名称输入框的 widget Id（打开弹窗时聚焦用）
 pub(crate) const PROJECT_DIALOG_NAME_ID: iced::widget::Id =
     iced::widget::Id::new("add-project-dialog-name");
@@ -258,7 +262,17 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         .on_submit(Message::SubmitAddDialog)
         .padding(10);
 
-    // 所属项目："无项目" + 全部项目（与编辑模式共用选项包装）
+    // 所属项目："无项目" + 全部项目（与编辑模式共用选项包装）+ 快速新建入口
+    let quick_btn = button(
+        text(if dialog.quick_project_open {
+            "收起"
+        } else {
+            "＋ 新建"
+        })
+        .size(13),
+    )
+    .on_press(Message::ToggleQuickProject)
+    .padding([4, 8]);
     let project_picker = row![
         text("所属项目")
             .size(13)
@@ -273,9 +287,41 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         .text_size(13)
         .padding([4, 8])
         .width(Length::Fill),
+        quick_btn,
     ]
     .spacing(6)
     .align_y(Alignment::Center);
+
+    // 快速新建项目输入行（仅展开时渲染）：名称（必填）+ 创建 / 取消
+    let mut quick_project_row: Option<Element<'_, Message>> = None;
+    if dialog.quick_project_open {
+        let name_input = text_input("新项目名称（必填）", &dialog.quick_project_name)
+            .id(ADD_DIALOG_QUICK_PROJECT_ID)
+            .on_input(Message::QuickProjectNameChanged)
+            .on_submit(Message::SubmitQuickProject)
+            .padding(10);
+        let create_btn = button(text("创建").size(13))
+            .on_press_maybe(
+                (!dialog.quick_project_name.trim().is_empty())
+                    .then_some(Message::SubmitQuickProject),
+            )
+            .style(button::primary)
+            .padding([4, 10]);
+        let cancel_btn = button(text("取消").size(13))
+            .on_press(Message::ToggleQuickProject)
+            .padding([4, 10]);
+        quick_project_row = Some(
+            row![
+                Space::new().width(78.0), // 与「所属项目」标签对齐（72 + 间距 6）
+                name_input,
+                create_btn,
+                cancel_btn,
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+    }
 
     // 优先级（可选）：下拉
     let priority_row = row![
@@ -324,6 +370,12 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     ]
     .spacing(10);
 
+    if let Some(quick_row) = quick_project_row {
+        form = form.push(quick_row);
+    }
+    if let Some(notice) = &dialog.quick_project_notice {
+        form = form.push(text(notice.as_str()).size(12).color(ERROR_COLOR));
+    }
     if let Err(hint) = &dialog.due_parsed {
         form = form.push(text(hint.as_str()).size(12).color(ERROR_COLOR));
     }

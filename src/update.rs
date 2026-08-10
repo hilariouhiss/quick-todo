@@ -34,6 +34,8 @@ pub enum Message {
     SortModeChanged(SortMode),
     /// 项目排序方式切换（持久化偏好，触发落盘）
     ProjectSortModeChanged(SortMode),
+    /// 主题模式循环切换：跟随系统 → 浅色 → 深色（持久化偏好，触发落盘）
+    CycleThemeMode,
     /// 打开弹窗添加项目（名称 + 优先级 + 可选起止时间）
     OpenProjectDialog,
     /// 关闭弹窗添加项目（丢弃已填内容，不落盘）
@@ -149,9 +151,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::Loaded(Ok(store)) => {
             app.todos = store.todos;
             app.projects = store.projects;
-            // 恢复持久化的排序偏好（旧文件缺省已在反序列化时取「综合」）
+            // 恢复持久化的排序偏好与主题模式（旧文件缺省已在反序列化时取默认）
             app.sort_mode = store.sort_mode;
             app.project_sort_mode = store.project_sort_mode;
+            app.theme_mode = store.theme_mode;
         }
         Message::Loaded(Err(error)) => app.error = Some(format!("加载数据失败: {error}")),
         Message::Saved(Ok(())) => {}
@@ -167,6 +170,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::ProjectSortModeChanged(mode) => {
             // 排序偏好持久化：切换即落盘（settings.json 整文件覆写）
             app.project_sort_mode = mode;
+            return persist_settings(app);
+        }
+
+        Message::CycleThemeMode => {
+            // 主题偏好持久化：循环切换即落盘（settings.json 整文件覆写）
+            app.theme_mode = app.theme_mode.next();
             return persist_settings(app);
         }
 
@@ -674,10 +683,10 @@ fn persist(op: Op) -> Task<Message> {
     Task::perform(storage::apply(op), Message::Saved)
 }
 
-/// 派发排序偏好写盘：两个值都取自 app 当前状态，整文件覆写（无读-改-写竞态）。
+/// 派发排序偏好与主题模式写盘：值均取自 app 当前状态，整文件覆写（无读-改-写竞态）。
 fn persist_settings(app: &App) -> Task<Message> {
     Task::perform(
-        storage::save_settings(app.sort_mode, app.project_sort_mode),
+        storage::save_settings(app.sort_mode, app.project_sort_mode, app.theme_mode),
         Message::Saved,
     )
 }
@@ -685,6 +694,7 @@ fn persist_settings(app: &App) -> Task<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ThemeMode;
     use chrono::TimeZone;
 
     fn app_with(now: DateTime<Utc>) -> App {
@@ -1223,6 +1233,7 @@ mod tests {
             projects: vec![Project::new("工作".into(), Utc::now())],
             sort_mode: SortMode::Priority,
             project_sort_mode: SortMode::Due,
+            theme_mode: ThemeMode::Dark,
         };
 
         let _ = update(&mut app, Message::Loaded(Ok(store)));
@@ -1231,6 +1242,7 @@ mod tests {
         assert_eq!(app.projects.len(), 1);
         assert_eq!(app.sort_mode, SortMode::Priority); // 排序偏好随加载恢复
         assert_eq!(app.project_sort_mode, SortMode::Due);
+        assert_eq!(app.theme_mode, ThemeMode::Dark); // 主题模式随加载恢复
     }
 
     #[test]
@@ -1244,6 +1256,24 @@ mod tests {
         let _ = update(&mut app, Message::ProjectSortModeChanged(SortMode::Due));
         assert_eq!(app.project_sort_mode, SortMode::Due);
         assert_eq!(app.sort_mode, SortMode::Priority); // 互不影响
+    }
+
+    #[test]
+    fn cycle_theme_mode_cycles_and_persists() {
+        let mut app = App::default();
+        assert_eq!(app.theme_mode, ThemeMode::default()); // 默认跟随系统
+
+        let _ = update(&mut app, Message::CycleThemeMode);
+        assert_eq!(app.theme_mode, ThemeMode::Light);
+
+        let _ = update(&mut app, Message::CycleThemeMode);
+        assert_eq!(app.theme_mode, ThemeMode::Dark);
+
+        let _ = update(&mut app, Message::CycleThemeMode);
+        assert_eq!(app.theme_mode, ThemeMode::System); // 循环回起点
+
+        let _ = update(&mut app, Message::CycleThemeMode);
+        assert_eq!(app.theme_mode, ThemeMode::Light);
     }
 
     #[test]

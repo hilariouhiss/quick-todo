@@ -12,14 +12,22 @@ mod view;
 use iced::futures::{SinkExt, channel::mpsc};
 use iced::{Size, Subscription, Task, Theme};
 
-use model::App;
+use model::{App, ThemeMode};
 use update::{Message, update};
 use view::view;
 
 pub fn main() -> iced::Result {
     iced::application(boot, update, view)
         .title("待办清单 · Quick Todo")
-        .theme(Theme::Dark)
+        // 主题：System → None（iced 原生跟随系统，切换实时生效）；
+        // Light / Dark → 固定模式（不随系统变化）
+        .theme(|app: &App| -> Option<Theme> {
+            match app.theme_mode {
+                ThemeMode::System => None,
+                ThemeMode::Light => Some(Theme::Light),
+                ThemeMode::Dark => Some(Theme::Dark),
+            }
+        })
         .window(iced::window::Settings {
             min_size: Some(Size::new(480.0, 360.0)),
             ..Default::default()

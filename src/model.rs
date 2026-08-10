@@ -83,6 +83,39 @@ pub type CombinedOrderKey = (
     (bool, Option<DateTime<Utc>>),
 );
 
+/// 主题模式：跟随系统 / 固定浅色 / 固定深色。
+/// 序列化存英文变体名（随 settings.json 持久化，缺省 `System`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ThemeMode {
+    /// 跟随系统主题（默认；iced 原生跟随，系统切换实时生效）
+    #[default]
+    System,
+    /// 固定浅色
+    Light,
+    /// 固定深色
+    Dark,
+}
+
+impl ThemeMode {
+    /// 主题模式的中文显示名（主题切换按钮用）。
+    pub const fn label(self) -> &'static str {
+        match self {
+            ThemeMode::System => "跟随系统",
+            ThemeMode::Light => "浅色",
+            ThemeMode::Dark => "深色",
+        }
+    }
+
+    /// 循环下一个模式：跟随系统 → 浅色 → 深色 → 跟随系统。
+    pub const fn next(self) -> Self {
+        match self {
+            ThemeMode::System => ThemeMode::Light,
+            ThemeMode::Light => ThemeMode::Dark,
+            ThemeMode::Dark => ThemeMode::System,
+        }
+    }
+}
+
 /// 一条任务记录：标题 + 可选描述 + 可选优先级 + 归属项目 + 截止时间 + 三个关键时间点。
 ///
 /// - `description`：可选描述（空串 = 无描述，创建时填写，卡片只读显示）
@@ -464,6 +497,8 @@ pub struct App {
     pub sort_mode: SortMode,
     /// 项目排序方式（**持久化偏好**，启动经 `Loaded` 恢复，缺省「综合」）
     pub project_sort_mode: SortMode,
+    /// 主题模式（**持久化偏好**，启动经 `Loaded` 恢复，缺省「跟随系统」）
+    pub theme_mode: ThemeMode,
 }
 
 impl Default for App {
@@ -482,6 +517,7 @@ impl Default for App {
             todo_edit: None,
             sort_mode: SortMode::default(),
             project_sort_mode: SortMode::default(),
+            theme_mode: ThemeMode::default(),
         }
     }
 }
@@ -651,6 +687,34 @@ mod tests {
         assert_eq!(Priority::Low.label(), "低");
         assert_eq!(Priority::Medium.label(), "中");
         assert_eq!(Priority::High.label(), "高");
+    }
+
+    #[test]
+    fn theme_mode_defaults_and_labels() {
+        assert_eq!(ThemeMode::default(), ThemeMode::System);
+        assert_eq!(ThemeMode::System.label(), "跟随系统");
+        assert_eq!(ThemeMode::Light.label(), "浅色");
+        assert_eq!(ThemeMode::Dark.label(), "深色");
+    }
+
+    #[test]
+    fn theme_mode_cycles() {
+        assert_eq!(ThemeMode::System.next(), ThemeMode::Light);
+        assert_eq!(ThemeMode::Light.next(), ThemeMode::Dark);
+        assert_eq!(ThemeMode::Dark.next(), ThemeMode::System);
+    }
+
+    #[test]
+    fn theme_mode_serde_roundtrip() {
+        // settings.json 存英文变体名
+        assert_eq!(
+            serde_json::to_string(&ThemeMode::System).unwrap(),
+            "\"System\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ThemeMode>("\"Dark\"").unwrap(),
+            ThemeMode::Dark
+        );
     }
 
     #[test]

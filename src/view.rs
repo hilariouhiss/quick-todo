@@ -247,11 +247,21 @@ const BOLD: Font = Font {
 /// 应用主视图：标题栏（分体按钮 + 下拉菜单）+ 项目单行栏 + 双列任务区；右下角悬浮状态簇。
 /// 任一弹窗（任务添加 / 项目添加编辑 / 已完成归档）打开时，叠加模态遮罩与弹窗卡片。
 pub fn view(app: &App) -> Element<'_, Message> {
-    // 标题栏：左侧标题；右端分体按钮（「＋ 添加任务」主按钮 + 「▾」下拉箭头，
+    // 标题栏：左侧标题；右端主题切换按钮 + 分体按钮（「＋ 添加任务」主按钮 + 「▾」下拉箭头，
     // 下拉菜单含「＋ 添加项目」入口）；摘要移至右下角状态簇（status_cluster）
     let header = row![
         text("待办清单").size(FONT_TITLE).font(BOLD),
         Space::new().width(Length::Fill),
+        // 主题切换：循环 跟随系统 → 浅色 → 深色（偏好持久化）
+        tooltip(
+            button(text(app.theme_mode.label()).size(FONT_SMALL))
+                .on_press(Message::CycleThemeMode)
+                .style(button::text)
+                .padding(BTN_SMALL),
+            text("点击切换主题（跟随系统 / 浅色 / 深色）"),
+            tooltip::Position::Bottom,
+        ),
+        Space::new().width(SPACE_M),
         row![
             button(text("＋ 添加任务").size(FONT_BODY))
                 .on_press(Message::OpenAddDialog)

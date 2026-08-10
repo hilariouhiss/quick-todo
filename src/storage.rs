@@ -15,22 +15,25 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::model::{Priority, Project, SortMode, Todo};
+use crate::model::{Priority, Project, SortMode, ThemeMode, Todo};
 
-/// 内存持久化数据：任务 + 项目 + 排序偏好（load 结果 / persist 数据源）。
+/// 内存持久化数据：任务 + 项目 + 排序偏好 + 主题模式（load 结果 / persist 数据源）。
 #[derive(Debug, Clone, Default)]
 pub struct Store {
     pub todos: Vec<Todo>,
     pub projects: Vec<Project>,
     pub sort_mode: SortMode,
     pub project_sort_mode: SortMode,
+    pub theme_mode: ThemeMode,
 }
 
-/// 排序偏好（独立 settings.json 持久化；缺省「综合」）。
+/// 排序偏好 + 主题模式（独立 settings.json 持久化；缺省「综合」/「跟随系统」）。
+/// 注意：`theme_mode` 为**必填键**——旧文件缺键解析失败（开发阶段破坏性更新，不迁移）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub sort_mode: SortMode,
     pub project_sort_mode: SortMode,
+    pub theme_mode: ThemeMode,
 }
 
 impl Default for Settings {
@@ -38,6 +41,7 @@ impl Default for Settings {
         Self {
             sort_mode: SortMode::Combined,
             project_sort_mode: SortMode::Combined,
+            theme_mode: ThemeMode::System,
         }
     }
 }
@@ -86,6 +90,7 @@ pub async fn load() -> Result<Store, String> {
         projects,
         sort_mode: settings.sort_mode,
         project_sort_mode: settings.project_sort_mode,
+        theme_mode: settings.theme_mode,
     })
 }
 
@@ -94,11 +99,16 @@ pub async fn apply(op: Op) -> Result<(), String> {
     apply_to(db_file(), op).await
 }
 
-/// 整文件覆写排序偏好（两个值都来自 app 当前状态，无读-改-写竞态）。
-pub async fn save_settings(sort_mode: SortMode, project_sort_mode: SortMode) -> Result<(), String> {
+/// 整文件覆写排序偏好与主题模式（值均来自 app 当前状态，无读-改-写竞态）。
+pub async fn save_settings(
+    sort_mode: SortMode,
+    project_sort_mode: SortMode,
+    theme_mode: ThemeMode,
+) -> Result<(), String> {
     let settings = Settings {
         sort_mode,
         project_sort_mode,
+        theme_mode,
     };
     let path = settings_file();
     if let Some(parent) = path.parent() {
@@ -121,7 +131,8 @@ async fn load_db_from(path: &Path) -> Result<(Vec<Todo>, Vec<Project>), String> 
         .map_err(|error| format!("加载数据库任务失败: {error}"))?
 }
 
-/// 从指定路径加载排序偏好（供测试复用）；缺失 / 缺键取默认「综合」。
+/// 从指定路径加载排序偏好与主题模式（供测试复用）；文件缺失取默认，缺键（如旧文件无
+/// `theme_mode`）解析失败报错（开发阶段破坏性更新，不迁移）。
 async fn load_settings_from(path: &Path) -> Result<Settings, String> {
     match tokio::fs::read_to_string(path).await {
         Ok(contents) => serde_json::from_str(&contents)
@@ -610,10 +621,11 @@ mod tests {
         let path = temp_path("settings.json");
         let _ = std::fs::remove_file(&path).ok();
 
-        // 缺失 → 默认「综合」
+        // 缺失 → 默认「综合」/「跟随系统」
         let settings = load_settings_from(&path).await.unwrap();
         assert_eq!(settings.sort_mode, SortMode::Combined);
         assert_eq!(settings.project_sort_mode, SortMode::Combined);
+        assert_eq!(settings.theme_mode, ThemeMode::System);
 
         // 写入后往返
         save_settings_to(
@@ -621,6 +633,7 @@ mod tests {
             Settings {
                 sort_mode: SortMode::Priority,
                 project_sort_mode: SortMode::Due,
+                theme_mode: ThemeMode::Dark,
             },
         )
         .await
@@ -628,6 +641,17 @@ mod tests {
         let loaded = load_settings_from(&path).await.unwrap();
         assert_eq!(loaded.sort_mode, SortMode::Priority);
         assert_eq!(loaded.project_sort_mode, SortMode::Due);
+        assert_eq!(loaded.theme_mode, ThemeMode::Dark);
+
+        // 旧文件缺 theme_mode 键 → 解析失败报错（破坏性更新，不迁移）
+        std::fs::write(
+            &path,
+            "{\"sort_mode\":\"Combined\",\"project_sort_mode\":\"Combined\"}",
+        )
+        .unwrap();
+        let result = load_settings_from(&path).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("解析"));
 
         // 损坏 → Err
         std::fs::write(&path, "这不是 JSON").unwrap();

@@ -52,7 +52,7 @@ pub enum Message {
     OpenCompletedDialog,
     /// 关闭已完成归档弹窗（纯 UI 状态，不落盘）
     CloseCompletedDialog,
-    /// 开始编辑项目：进入侧边栏内联编辑态并预填名称与起止时间
+    /// 开始编辑项目：进入项目栏下方展开的编辑面板并预填名称与起止时间
     StartEditProject(Uuid),
     /// 编辑：名称输入框变化
     ProjectEditNameChanged(String),
@@ -88,8 +88,6 @@ pub enum Message {
     EditQuickDue(QuickDue),
     /// 编辑：点击"保存"/回车（校验通过后更新任务并落盘）
     SaveEditTodo,
-    /// 收起 / 展开项目侧边栏（纯 UI 状态，不触发落盘）
-    ToggleSidebar,
     /// 打开弹窗添加任务（唯一添加入口，预选当前筛选的项目）
     OpenAddDialog,
     /// 关闭弹窗添加任务（丢弃已填内容，不落盘）
@@ -108,8 +106,8 @@ pub enum Message {
     DialogDueChanged(String),
     /// 弹窗：快捷时间下拉选择（回填到截止时间输入框）
     DialogQuickDue(QuickDue),
-    /// 任务弹窗：点击「＋ 新建」弹出与侧边栏相同的新建项目弹窗
-    /// （保留任务弹窗状态，关闭项目弹窗后返回；侧边栏路径见 `OpenProjectDialog`）
+    /// 任务弹窗：点击「＋ 新建」弹出与标题栏相同的新建项目弹窗
+    /// （保留任务弹窗状态，关闭项目弹窗后返回；标题栏路径见 `OpenProjectDialog`）
     OpenQuickProjectDialog,
     /// 弹窗：点击"创建"/回车提交（校验通过后创建任务并落盘）
     SubmitAddDialog,
@@ -256,7 +254,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.projects.push(project.clone());
             app.project_dialog = None;
             // 从任务弹窗打开（快速新建）：自动选中新项目，焦点回落标题框
-            // （判别依据：侧边栏 OpenProjectDialog 恒清空 add_dialog，因此项目弹窗打开时
+            // （判别依据：标题栏 OpenProjectDialog 恒清空 add_dialog，因此项目弹窗打开时
             //   add_dialog 仍在 ⇔ 快速路径）
             if app.add_dialog.is_some() {
                 if let Some(dialog) = &mut app.add_dialog {
@@ -408,8 +406,6 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::SelectProject(selection) => app.selected_project = selection,
-
-        Message::ToggleSidebar => app.sidebar_visible = !app.sidebar_visible,
 
         Message::OpenAddDialog => {
             // 弹窗互斥：打开任务弹窗时关闭项目弹窗与归档弹窗
@@ -1201,18 +1197,6 @@ mod tests {
 
         let _ = update(&mut app, Message::SelectProject(None));
         assert_eq!(app.selected_project, None);
-    }
-
-    #[test]
-    fn toggle_sidebar_flips_visibility() {
-        let mut app = App::default();
-        assert!(!app.sidebar_visible); // 启动默认收起
-
-        let _ = update(&mut app, Message::ToggleSidebar);
-        assert!(app.sidebar_visible);
-
-        let _ = update(&mut app, Message::ToggleSidebar);
-        assert!(!app.sidebar_visible);
     }
 
     #[test]

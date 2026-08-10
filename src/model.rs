@@ -246,7 +246,7 @@ impl Project {
 }
 
 /// 弹窗添加任务的表单状态（纯内存，不持久化；`App.add_dialog = None` 表示弹窗关闭）。
-/// 所属项目的快速新建入口见 `OpenQuickProjectDialog`：弹出与侧边栏相同的新建项目弹窗，
+/// 所属项目的快速新建入口见 `OpenQuickProjectDialog`：弹出与标题栏相同的新建项目弹窗，
 /// 创建成功后自动选中新项目（`project_id`），任务弹窗本身不持有快速新建状态。
 #[derive(Debug, Clone)]
 pub struct AddDialog {
@@ -309,7 +309,7 @@ impl Default for ProjectDialog {
     }
 }
 
-/// 侧边栏内联编辑项目的表单状态（纯内存，不持久化；`App.project_edit = None` 表示未处于编辑态）。
+/// 项目编辑面板的表单状态（纯内存，不持久化；`App.project_edit = None` 表示未处于编辑态）。
 #[derive(Debug, Clone)]
 pub struct ProjectEdit {
     /// 正在编辑的项目 id
@@ -448,15 +448,13 @@ pub struct App {
     pub error: Option<String>,
     /// "当前时间"，由每秒的时钟订阅刷新，用于实时耗时显示
     pub now: DateTime<Utc>,
-    /// 项目侧边栏是否展开（纯 UI 状态，不持久化，启动默认收起）
-    pub sidebar_visible: bool,
     /// 弹窗添加任务表单（`None` = 弹窗关闭；纯内存状态，不持久化）
     pub add_dialog: Option<AddDialog>,
     /// 弹窗添加项目表单（`None` = 弹窗关闭；纯内存状态，不持久化）
     pub project_dialog: Option<ProjectDialog>,
     /// 已完成归档弹窗是否打开（纯 UI 状态，不持久化）
     pub show_completed: bool,
-    /// 侧边栏内联编辑项目表单（`None` = 未处于编辑态；纯内存状态，不持久化）
+    /// 项目编辑面板表单（`None` = 未处于编辑态；纯内存状态，不持久化）
     pub project_edit: Option<ProjectEdit>,
     /// 卡片编辑表单（`None` = 无卡片处于编辑态；纯内存状态，不持久化）
     pub todo_edit: Option<TodoEdit>,
@@ -474,7 +472,6 @@ impl Default for App {
             selected_project: None,
             error: None,
             now: Utc::now(),
-            sidebar_visible: false,
             add_dialog: None,
             project_dialog: None,
             show_completed: false,

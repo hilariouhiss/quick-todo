@@ -57,9 +57,13 @@ fn subscription(app: &App) -> Subscription<Message> {
     })
     .map(Message::Tick);
 
-    // 任一弹窗打开时：Esc 关闭当前弹窗（与点击遮罩等效）
+    // 任一弹窗或下拉菜单打开时：Esc 关闭当前弹窗 / 菜单（与点击遮罩等效）
     // 注意：listen_with 只接受无捕获的 fn 指针，因此固定发出 CloseActiveDialog
-    if app.add_dialog.is_some() || app.project_dialog.is_some() || app.show_completed {
+    if app.add_dialog.is_some()
+        || app.project_dialog.is_some()
+        || app.show_completed
+        || app.add_menu_open
+    {
         let esc = iced::event::listen_with(|event, _status, _window| {
             if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event
                 && key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)

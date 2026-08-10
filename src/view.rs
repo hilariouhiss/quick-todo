@@ -1,6 +1,6 @@
 //! 视图：把应用状态渲染成 iced 元素树。
 //!
-//! 布局：标题栏（含「＋ 添加任务 / ＋ 添加项目」双按钮）+ 项目单行栏
+//! 布局：标题栏（分体按钮「＋ 添加任务 ▾」，下拉菜单含「＋ 添加项目」）+ 项目单行栏
 //! （左侧排序下拉 + 横向滚动芯片）+ 任务区（统一标题行：两列计数 + 右上角排序下拉 + 双列）。
 //! 右下角悬浮「已完成 (N)」归档入口。
 //! 每个任务一张卡片：标题、状态徽章、操作按钮、只读属性展示（含项目归属），
@@ -26,6 +26,11 @@ const ERROR_COLOR: Color = Color::from_rgb(0.92, 0.45, 0.45);
 const ACCENT: Color = Color::from_rgb(0.98, 0.70, 0.25);
 /// 已完成（绿）
 const DONE: Color = Color::from_rgb(0.36, 0.78, 0.50);
+/// 下拉菜单卡片宽度（与标题栏分体按钮宽度相近，右缘对齐）
+const ADD_MENU_WIDTH: f32 = 150.0;
+/// 下拉菜单距窗口顶部的偏移：内容区 padding 24 + 标题行高（26px 字号 ≈34）
+/// + 按钮垂直居中（按钮底 ≈55）+ 9px 间隙；字体 / DPI 变化时在此校准
+const ADD_MENU_TOP: f32 = 64.0;
 
 /// 弹窗标题输入框的 widget Id（打开弹窗时聚焦用）
 pub(crate) const DIALOG_TITLE_ID: iced::widget::Id = iced::widget::Id::new("add-dialog-title");
@@ -126,27 +131,28 @@ const BOLD: Font = Font {
     ..Font::DEFAULT
 };
 
-/// 应用主视图：标题栏（双按钮）+ 项目单行栏 + 双列任务区；右下角悬浮归档入口。
+/// 应用主视图：标题栏（分体按钮 + 下拉菜单）+ 项目单行栏 + 双列任务区；右下角悬浮归档入口。
 /// 任一弹窗（任务添加 / 项目添加编辑 / 已完成归档）打开时，叠加模态遮罩与弹窗卡片。
 pub fn view(app: &App) -> Element<'_, Message> {
-    // 标题栏：左侧标题；右端摘要 + 「＋ 添加任务」下方「＋ 添加项目」双按钮
+    // 标题栏：左侧标题；右端摘要 + 分体按钮（「＋ 添加任务」主按钮 + 「▾」下拉箭头，
+    // 下拉菜单含「＋ 添加项目」入口）
     let header = row![
         text("待办清单").size(26).font(BOLD),
         Space::new().width(Length::Fill),
         text(summary(app)).size(13).color(MUTED),
         Space::new().width(10),
-        column![
+        row![
             button(text("＋ 添加任务").size(13))
                 .on_press(Message::OpenAddDialog)
                 .style(button::primary)
                 .padding([6, 12]),
-            button(text("＋ 添加项目").size(13))
-                .on_press(Message::OpenProjectDialog)
-                .style(button::secondary)
-                .padding([6, 12]),
+            button(text("▾").size(13))
+                .on_press(Message::ToggleAddMenu)
+                .style(button::primary)
+                .padding([6, 8]),
         ]
-        .spacing(6)
-        .align_x(Alignment::End),
+        .spacing(1)
+        .align_y(Alignment::Center),
     ]
     .align_y(Alignment::Center);
 
@@ -183,9 +189,36 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .center_x(Length::Fill);
 
     // 右下角悬浮「已完成 (N)」入口（叠加在内容之上、弹窗遮罩之下）
-    let content = stack![base, completed_fab(app)]
+    // 下拉菜单展开时：再叠 透明捕获层（点击外部关闭，无压暗）+ 右上角菜单卡片（最顶层）
+    let content = if app.add_menu_open {
+        stack![
+            base,
+            completed_fab(app),
+            mouse_area(
+                container(Space::new())
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .on_press(Message::CloseActiveDialog),
+            container(opaque(add_menu_card()))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::End)
+                .align_y(Alignment::Start)
+                .padding(iced::Padding {
+                    top: ADD_MENU_TOP,
+                    right: 24.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                }),
+        ]
         .width(Length::Fill)
-        .height(Length::Fill);
+        .height(Length::Fill)
+    } else {
+        stack![base, completed_fab(app)]
+            .width(Length::Fill)
+            .height(Length::Fill)
+    };
 
     // 弹窗打开时：内容之上叠加 遮罩（点击关闭）+ 弹窗卡片（不透明，防穿透）
     // 任务 / 项目 / 归档弹窗互斥；任务弹窗内「＋ 新建」会叠加打开项目弹窗（顶层）
@@ -816,6 +849,26 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
         .padding(12)
         .style(card_style)
         .into()
+}
+
+// ---------- 标题栏添加下拉菜单 ----------
+
+/// 标题栏分体按钮的下拉菜单卡片：右上角悬浮（无压暗），含「＋ 添加项目」入口。
+/// 点击菜单项打开项目弹窗（弹窗互斥逻辑不变，update 层自动收起菜单）。
+fn add_menu_card() -> Element<'static, Message> {
+    container(
+        column![
+            button(text("＋ 添加项目").size(13))
+                .on_press(Message::OpenProjectDialog)
+                .style(button::text)
+                .padding([8, 12])
+                .width(Length::Fill)
+        ]
+        .padding(4),
+    )
+    .width(Length::Fixed(ADD_MENU_WIDTH))
+    .style(card_style)
+    .into()
 }
 
 // ---------- 右下角归档入口 ----------

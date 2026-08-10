@@ -90,6 +90,8 @@ pub enum Message {
     SaveEditTodo,
     /// 打开弹窗添加任务（唯一添加入口，预选当前筛选的项目）
     OpenAddDialog,
+    /// 展开 / 收起标题栏分体按钮的下拉菜单（纯 UI 状态，不触发落盘）
+    ToggleAddMenu,
     /// 关闭弹窗添加任务（丢弃已填内容，不落盘）
     CloseAddDialog,
     /// 关闭当前打开的弹窗（任务 / 项目 / 已完成归档；点击遮罩 / Esc 触发）
@@ -169,9 +171,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::OpenProjectDialog => {
-            // 弹窗互斥：打开项目弹窗时关闭任务弹窗与归档弹窗
+            // 弹窗互斥：打开项目弹窗时关闭任务弹窗与归档弹窗（并收起下拉菜单）
             app.add_dialog = None;
             app.show_completed = false;
+            app.add_menu_open = false;
             app.project_dialog = Some(ProjectDialog::default());
             // 聚焦弹窗名称输入框（下一次渲染生效）
             return iced::widget::operation::focus(PROJECT_DIALOG_NAME_ID);
@@ -269,9 +272,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::OpenCompletedDialog => {
-            // 弹窗互斥：打开归档弹窗时关闭任务 / 项目弹窗
+            // 弹窗互斥：打开归档弹窗时关闭任务 / 项目弹窗（并收起下拉菜单）
             app.add_dialog = None;
             app.project_dialog = None;
+            app.add_menu_open = false;
             app.show_completed = true;
         }
 
@@ -407,10 +411,19 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::SelectProject(selection) => app.selected_project = selection,
 
+        Message::ToggleAddMenu => {
+            // 防御：任一弹窗打开时不可展开菜单（按钮被遮罩覆盖，UI 不可达）
+            if app.add_dialog.is_some() || app.project_dialog.is_some() || app.show_completed {
+                return Task::none();
+            }
+            app.add_menu_open = !app.add_menu_open;
+        }
+
         Message::OpenAddDialog => {
-            // 弹窗互斥：打开任务弹窗时关闭项目弹窗与归档弹窗
+            // 弹窗互斥：打开任务弹窗时关闭项目弹窗与归档弹窗（并收起下拉菜单）
             app.project_dialog = None;
             app.show_completed = false;
+            app.add_menu_open = false;
             // 弹窗打开：处于项目筛选时预选该项目，作为默认归属
             app.add_dialog = Some(AddDialog {
                 project_id: app.selected_project,
@@ -431,6 +444,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.project_dialog = None;
             } else if app.add_dialog.is_some() {
                 app.add_dialog = None;
+            } else if app.add_menu_open {
+                // 下拉菜单：位于弹窗之后、归档之前（菜单与弹窗互斥，此分支仅防御）
+                app.add_menu_open = false;
             } else {
                 app.show_completed = false;
             }
@@ -1789,5 +1805,103 @@ mod tests {
         assert!(app.project_dialog.is_none());
         assert!(app.add_dialog.is_none());
         assert!(app.show_completed);
+    }
+
+    // ---------- 标题栏分体按钮下拉菜单 ----------
+
+    #[test]
+    fn toggle_add_menu_flips_open() {
+        let mut app = App::default();
+        assert!(!app.add_menu_open); // 默认关闭
+
+        let _ = update(&mut app, Message::ToggleAddMenu);
+        assert!(app.add_menu_open);
+
+        let _ = update(&mut app, Message::ToggleAddMenu);
+        assert!(!app.add_menu_open);
+    }
+
+    #[test]
+    fn toggle_add_menu_ignored_while_dialog_open() {
+        let mut app = App::default();
+        // 任务弹窗打开时 noop
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::ToggleAddMenu);
+        assert!(!app.add_menu_open);
+
+        // 项目弹窗打开时 noop
+        app.add_dialog = None;
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        let _ = update(&mut app, Message::ToggleAddMenu);
+        assert!(!app.add_menu_open);
+
+        // 归档弹窗打开时 noop
+        app.project_dialog = None;
+        let _ = update(&mut app, Message::OpenCompletedDialog);
+        let _ = update(&mut app, Message::ToggleAddMenu);
+        assert!(!app.add_menu_open);
+    }
+
+    #[test]
+    fn close_active_dialog_closes_menu() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::ToggleAddMenu);
+        assert!(app.add_menu_open);
+
+        let _ = update(&mut app, Message::CloseActiveDialog);
+
+        assert!(!app.add_menu_open);
+        assert!(app.add_dialog.is_none());
+        assert!(app.project_dialog.is_none());
+        assert!(!app.show_completed);
+    }
+
+    #[test]
+    fn open_add_dialog_closes_menu() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::ToggleAddMenu);
+
+        let _ = update(&mut app, Message::OpenAddDialog);
+
+        assert!(!app.add_menu_open); // 菜单关闭
+        assert!(app.add_dialog.is_some()); // 任务弹窗打开
+        // 弹窗打开后 toggle noop（防御闭环）
+        let _ = update(&mut app, Message::ToggleAddMenu);
+        assert!(!app.add_menu_open);
+    }
+
+    #[test]
+    fn open_project_dialog_closes_menu() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::ToggleAddMenu);
+
+        let _ = update(&mut app, Message::OpenProjectDialog);
+
+        assert!(!app.add_menu_open);
+        assert!(app.project_dialog.is_some());
+    }
+
+    #[test]
+    fn open_completed_dialog_closes_menu() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::ToggleAddMenu);
+
+        let _ = update(&mut app, Message::OpenCompletedDialog);
+
+        assert!(!app.add_menu_open);
+        assert!(app.show_completed);
+    }
+
+    #[test]
+    fn close_active_dialog_prefers_menu_over_completed() {
+        // 防御路径：菜单与归档同时为真（UI 不可达）时先关菜单
+        let mut app = App::default();
+        let _ = update(&mut app, Message::ToggleAddMenu);
+        app.show_completed = true;
+
+        let _ = update(&mut app, Message::CloseActiveDialog);
+
+        assert!(!app.add_menu_open);
+        assert!(app.show_completed); // 归档保持（下一次 Esc 才关闭）
     }
 }

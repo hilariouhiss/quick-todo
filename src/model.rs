@@ -454,6 +454,8 @@ pub struct App {
     pub project_dialog: Option<ProjectDialog>,
     /// 已完成归档弹窗是否打开（纯 UI 状态，不持久化）
     pub show_completed: bool,
+    /// 标题栏分体按钮的下拉菜单是否展开（纯 UI 状态，不持久化，默认关闭）
+    pub add_menu_open: bool,
     /// 项目编辑面板表单（`None` = 未处于编辑态；纯内存状态，不持久化）
     pub project_edit: Option<ProjectEdit>,
     /// 卡片编辑表单（`None` = 无卡片处于编辑态；纯内存状态，不持久化）
@@ -475,6 +477,7 @@ impl Default for App {
             add_dialog: None,
             project_dialog: None,
             show_completed: false,
+            add_menu_open: false,
             project_edit: None,
             todo_edit: None,
             sort_mode: SortMode::default(),

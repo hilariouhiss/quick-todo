@@ -1,11 +1,11 @@
 //! 持久化：任务与项目统一以 JSON 文件存放在系统应用数据目录。
 //!
-//! Windows 下默认路径为 `%APPDATA%\quick-todo\todos.json`；
-//! 重命名前的旧目录（`%APPDATA%\iced-todos`）若有数据，新路径缺失时自动回退加载（一次性迁移）。
-//! 文件缺失视为空数据；损坏文件返回错误（由 UI 提示，不崩溃）。
+//! Windows 下默认路径为 `%APPDATA%\quick-todo\todos.json`。
+//! 文件缺失视为空数据；损坏 / 旧版格式文件返回错误（由 UI 提示，不崩溃）。
 //!
-//! 格式演进：旧版本文件为纯任务数组 `Vec<Todo>`，
-//! 新版本为 `Store { todos, projects }`；加载时自动兼容迁移旧格式。
+//! 格式为严格 schema（开发阶段破坏性更新不兼容旧数据）：
+//! 必填字段缺失、文件非 Store 对象（如旧版纯数组）直接解析失败；
+//! 可选字段（`Option`）缺省等同 `null`（serde 固有语义）。
 
 use std::path::PathBuf;
 
@@ -18,11 +18,9 @@ use crate::model::{Project, SortMode, Todo};
 pub struct Store {
     pub todos: Vec<Todo>,
     pub projects: Vec<Project>,
-    /// 任务排序方式（持久化偏好；旧文件缺省 → 综合）
-    #[serde(default)]
+    /// 任务排序方式（持久化偏好；缺省 `Combined`）
     pub sort_mode: SortMode,
-    /// 项目排序方式（持久化偏好；旧文件缺省 → 综合）
-    #[serde(default)]
+    /// 项目排序方式（持久化偏好；缺省 `Combined`）
     pub project_sort_mode: SortMode,
 }
 
@@ -33,27 +31,9 @@ pub fn data_file() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("todos.json"))
 }
 
-/// 旧版数据文件路径（应用重命名前的目录标识，用于一次性迁移旧数据）。
-fn legacy_data_file() -> PathBuf {
-    directories::ProjectDirs::from("dev", "iced-demo", "iced-todos")
-        .map(|dirs| dirs.data_dir().join("todos.json"))
-        .unwrap_or_else(|| PathBuf::from("todos.json"))
-}
-
-/// 从默认数据文件加载任务与项目；新路径缺失时回退旧版路径（兼容重命名前的数据）。
+/// 从默认数据文件加载任务与项目。
 pub async fn load() -> Result<Store, String> {
-    load_with_fallback(data_file(), legacy_data_file()).await
-}
-
-/// 优先读新路径，缺失时回退旧路径（供测试直接指定两条路径）。
-async fn load_with_fallback(new_path: PathBuf, legacy_path: PathBuf) -> Result<Store, String> {
-    match tokio::fs::read_to_string(&new_path).await {
-        Ok(contents) => {
-            parse(&contents).map_err(|error| format!("解析 {} 失败: {error}", new_path.display()))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => load_from(legacy_path).await,
-        Err(error) => Err(format!("读取 {} 失败: {error}", new_path.display())),
-    }
+    load_from(data_file()).await
 }
 
 /// 把序列化好的数据 JSON 写入默认数据文件。
@@ -72,18 +52,9 @@ pub async fn load_from(path: PathBuf) -> Result<Store, String> {
     }
 }
 
-/// 解析数据文件内容；兼容旧版本纯任务数组格式。
+/// 解析数据文件内容（严格 schema：旧版纯数组 / 缺字段格式一律报错）。
 fn parse(contents: &str) -> Result<Store, String> {
-    match serde_json::from_str::<Store>(contents) {
-        Ok(store) => Ok(store),
-        // 旧版本：文件是纯任务数组（无项目），自动迁移为空项目列表
-        Err(_) => serde_json::from_str::<Vec<Todo>>(contents)
-            .map(|todos| Store {
-                todos,
-                ..Default::default()
-            })
-            .map_err(|error| error.to_string()),
-    }
+    serde_json::from_str(contents).map_err(|error| error.to_string())
 }
 
 /// 写入指定路径（供测试复用），自动创建父目录。
@@ -187,48 +158,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_store_without_sort_modes_loads() {
-        // 旧版 Store：无 sort_mode / project_sort_mode 字段，自动取默认「综合」
-        let path = temp_path("legacy-sort.json");
-        let json = r#"{
-            "todos": [],
-            "projects": []
-        }"#;
-        save_to(path.clone(), json.into()).await.unwrap();
-
-        let loaded = load_from(path.clone()).await.unwrap();
-
-        assert_eq!(loaded.sort_mode, SortMode::default()); // Combined
-        assert_eq!(loaded.project_sort_mode, SortMode::default());
-
-        let _ = tokio::fs::remove_file(&path).await;
-    }
-
-    #[tokio::test]
-    async fn legacy_store_projects_without_times_load() {
-        // 旧版 Store：项目无 started_at / finished_at 字段，自动落空
-        let path = temp_path("legacy-project.json");
-        let json = r#"{
-            "todos": [],
-            "projects": [
-                { "id": "0195c7e0-0000-7000-8000-000000000001", "name": "旧项目", "created_at": "2026-01-01T10:00:00Z" }
-            ]
-        }"#;
-        save_to(path.clone(), json.into()).await.unwrap();
-
-        let loaded = load_from(path.clone()).await.unwrap();
-
-        assert_eq!(loaded.projects.len(), 1);
-        assert_eq!(loaded.projects[0].name, "旧项目");
-        assert_eq!(loaded.projects[0].started_at, None); // 缺省字段安全落空
-        assert_eq!(loaded.projects[0].finished_at, None);
-
-        let _ = tokio::fs::remove_file(&path).await;
-    }
-
-    #[tokio::test]
-    async fn legacy_todos_array_migrates() {
-        // 旧版数据文件：纯任务数组（无 project_id / projects 字段）
+    async fn legacy_todos_array_is_rejected() {
+        // 严格 schema：旧版纯任务数组格式不再自动迁移，直接报错
         let path = temp_path("legacy.json");
         let legacy = r#"[
             {
@@ -241,72 +172,11 @@ mod tests {
         ]"#;
         save_to(path.clone(), legacy.into()).await.unwrap();
 
-        let loaded = load_from(path.clone()).await.unwrap();
+        let result = load_from(path.clone()).await;
 
-        assert_eq!(loaded.todos.len(), 1);
-        assert_eq!(loaded.todos[0].title, "旧任务");
-        assert_eq!(loaded.todos[0].description, ""); // 缺省字段安全落空
-        assert_eq!(loaded.todos[0].project_id, None); // 缺省字段安全落空
-        assert_eq!(loaded.todos[0].due_at, None); // 缺省字段安全落空
-        assert!(loaded.projects.is_empty()); // 迁移后无项目
+        assert!(result.is_err()); // 旧格式不兼容，UI 红字提示
 
         let _ = tokio::fs::remove_file(&path).await;
-    }
-
-    #[tokio::test]
-    async fn new_path_missing_falls_back_to_legacy_path() {
-        // 应用重命名前的旧目录数据：新路径缺失时自动回退加载（一次性迁移）
-        let new_path = temp_path("rename-new.json");
-        let legacy_path = temp_path("rename-legacy.json");
-        let _ = tokio::fs::remove_file(&new_path).await; // 确保新路径不存在
-        let legacy = r#"[
-            {
-                "id": "0195c7e0-0000-7000-8000-000000000001",
-                "title": "旧数据",
-                "created_at": "2026-01-01T10:00:00Z",
-                "started_at": null,
-                "finished_at": null
-            }
-        ]"#;
-        save_to(legacy_path.clone(), legacy.into()).await.unwrap();
-
-        let loaded = load_with_fallback(new_path, legacy_path.clone())
-            .await
-            .unwrap();
-
-        assert_eq!(loaded.todos.len(), 1);
-        assert_eq!(loaded.todos[0].title, "旧数据");
-        assert_eq!(loaded.todos[0].description, ""); // 缺省字段安全落空
-
-        let _ = tokio::fs::remove_file(&legacy_path).await;
-    }
-
-    #[tokio::test]
-    async fn new_path_takes_precedence_over_legacy_path() {
-        // 新路径已有数据时优先读取新路径，不再回退旧路径
-        let new_path = temp_path("rename-new2.json");
-        let legacy_path = temp_path("rename-legacy2.json");
-        let store = Store {
-            todos: sample_todos(),
-            ..Default::default()
-        };
-        save_to(
-            new_path.clone(),
-            serde_json::to_string_pretty(&store).unwrap(),
-        )
-        .await
-        .unwrap();
-        save_to(legacy_path.clone(), "[]".into()).await.unwrap();
-
-        let loaded = load_with_fallback(new_path.clone(), legacy_path.clone())
-            .await
-            .unwrap();
-
-        assert_eq!(loaded.todos.len(), 2);
-        assert_eq!(loaded.todos[0].title, "读书"); // 来自新路径
-
-        let _ = tokio::fs::remove_file(&new_path).await;
-        let _ = tokio::fs::remove_file(&legacy_path).await;
     }
 
     #[tokio::test]

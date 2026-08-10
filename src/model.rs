@@ -53,7 +53,7 @@ impl Priority {
 }
 
 /// 组内排序方式：优先级 / 截止日期 / 综合（优先级优先、同级按截止日期）。
-/// 序列化存英文变体名（随 Store 持久化，缺省 `Combined` 兼容旧文件）。
+/// 序列化存英文变体名（随 Store 持久化，缺省 `Combined`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SortMode {
     /// 按优先级：高→低，未设置排最后
@@ -99,20 +99,12 @@ pub struct Todo {
     pub id: Uuid,
     pub title: String,
     /// 可选描述（空串 = 无描述）。
-    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
-    #[serde(default)]
     pub description: String,
     /// 可选优先级（`None` = 未设置）。
-    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
-    #[serde(default)]
     pub priority: Option<Priority>,
     /// 所属项目（`None` = 未归属）。
-    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
-    #[serde(default)]
     pub project_id: Option<Uuid>,
     /// 截止时间（`None` = 无截止）。
-    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
-    #[serde(default)]
     pub due_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -202,16 +194,10 @@ pub struct Project {
     pub id: Uuid,
     pub name: String,
     /// 可选优先级（`None` = 未设置）。
-    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
-    #[serde(default)]
     pub priority: Option<Priority>,
     /// 项目开始时间（可选，`None` = 未设置）。
-    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
-    #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
     /// 项目结束时间（可选，`None` = 未设置）。
-    /// `#[serde(default)]`：兼容旧版数据文件（无此字段）。
-    #[serde(default)]
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
@@ -526,8 +512,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_json_without_description_defaults_to_empty() {
-        // 旧版数据：没有 description 字段，反序列化应自动落空
+    fn json_missing_description_is_rejected() {
+        // 严格 schema（开发阶段不兼容旧版数据）：缺必填字段（非 Option）应反序列化失败；
+        // Option 字段缺省等同 null 属 serde 固有语义，不视为兼容层
         let json = r#"{
             "id": "0195c7e0-0000-7000-8000-000000000001",
             "title": "旧任务",
@@ -535,10 +522,7 @@ mod tests {
             "started_at": null,
             "finished_at": null
         }"#;
-        let todo: Todo = serde_json::from_str(json).unwrap();
-        assert_eq!(todo.title, "旧任务");
-        assert!(todo.description.is_empty());
-        assert_eq!(todo.project_id, None);
+        assert!(serde_json::from_str::<Todo>(json).is_err());
     }
 
     #[test]
@@ -661,30 +645,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_json_without_priority_defaults_to_none() {
-        // 旧版数据：没有 priority 字段，反序列化应自动落空
-        let json = r#"{
-            "id": "0195c7e0-0000-7000-8000-000000000001",
-            "title": "旧任务",
-            "created_at": "2026-01-01T10:00:00Z",
-            "started_at": null,
-            "finished_at": null
-        }"#;
-        let todo: Todo = serde_json::from_str(json).unwrap();
-        assert_eq!(todo.priority, None);
-
-        let project: Project = serde_json::from_str(
-            r#"{
-            "id": "0195c7e0-0000-7000-8000-000000000001",
-            "name": "旧项目",
-            "created_at": "2026-01-01T10:00:00Z"
-        }"#,
-        )
-        .unwrap();
-        assert_eq!(project.priority, None);
-    }
-
-    #[test]
     fn sort_mode_defaults_and_labels() {
         assert_eq!(SortMode::default(), SortMode::Combined);
         assert_eq!(SortMode::Priority.label(), "优先级");
@@ -788,20 +748,6 @@ mod tests {
         assert_eq!(plain.priority, None);
         assert_eq!(plain.project_id, None);
         assert_eq!(plain.due_at, None);
-    }
-
-    #[test]
-    fn legacy_json_without_due_at_defaults_to_none() {
-        // 旧版数据：没有 due_at 字段，反序列化应自动落空
-        let json = r#"{
-            "id": "0195c7e0-0000-7000-8000-000000000001",
-            "title": "旧任务",
-            "created_at": "2026-01-01T10:00:00Z",
-            "started_at": null,
-            "finished_at": null
-        }"#;
-        let todo: Todo = serde_json::from_str(json).unwrap();
-        assert_eq!(todo.due_at, None);
     }
 
     #[test]
@@ -985,19 +931,5 @@ mod tests {
         assert_eq!(plain.priority, None);
         assert_eq!(plain.started_at, None);
         assert_eq!(plain.finished_at, None);
-    }
-
-    #[test]
-    fn legacy_project_json_without_times_defaults_to_none() {
-        // 旧版数据：没有 started_at / finished_at 字段，反序列化应自动落空
-        let json = r#"{
-            "id": "0195c7e0-0000-7000-8000-000000000001",
-            "name": "旧项目",
-            "created_at": "2026-01-01T10:00:00Z"
-        }"#;
-        let project: Project = serde_json::from_str(json).unwrap();
-        assert_eq!(project.name, "旧项目");
-        assert_eq!(project.started_at, None);
-        assert_eq!(project.finished_at, None);
     }
 }

@@ -52,7 +52,7 @@ src/
 ├── model.rs    数据模型：Todo、Project、TodoStatus、App（纯数据，无 IO）
 ├── update.rs   Message 枚举 + update 纯函数（状态流转、副作用派发）
 ├── view.rs     视图：项目侧边栏（可收放）+ 任务区（输入行、任务卡片/编辑模式、时间元信息）+ 弹窗（任务/项目添加）
-├── storage.rs  持久化：异步 JSON 读写（Store = 任务 + 项目，兼容旧格式）
+├── storage.rs  持久化：异步 JSON 读写（Store = 任务 + 项目，严格 schema）
 docs/
 └── 需求与概要设计.md     需求与概要设计文档 —— 需求 R1-R27 + 非功能 N1-N7、架构图、验收标准，改行为前必读
 ```
@@ -68,11 +68,11 @@ docs/
 2. **update 是纯函数。** 所有时间戳一律取自 `app.now`（由每秒 `Tick` 消息刷新），**不要**在 update 里直接调用 `Utc::now()`。副作用只通过返回的 `Task` 表达。
 3. **时间统一 UTC 存储**（`DateTime<Utc>`），仅在 view 层用 `chrono::Local` 格式化展示。
 4. **持久化 fire-and-forget**：每次状态变更后把整个 `Store`（todos + projects）`serde_json::to_string_pretty` 序列化，经 `Task::perform(storage::save, Message::Saved)` 异步写盘；`Saved` 成功消息静默，失败写入 `app.error`。不引入增量同步。
-5. **数据向后兼容**：`Todo.project_id` 与 `Todo.description` 带 `#[serde(default)]`；`storage::load` 对旧版纯数组格式自动迁移为 `Store`；数据目录重命名后（`iced-todos` → `quick-todo`），`storage::load` 在新路径缺失时自动回退旧路径加载（一次性迁移），不得破坏旧数据。
-6. **项目语义**：项目名 trim 后非空且不重名；项目添加走弹窗（`OpenProjectDialog` / `SubmitProjectDialog`），可带可选起止时间（`Project.started_at` / `finished_at`，`#[serde(default)]` 兼容旧数据；**开始必须早于结束**）；编辑走侧边栏**内联表单**（`StartEditProject` / `SaveEditProject`，名称 + 起止时间可改，**重名校验排除自身**）；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
+5. **数据不兼容旧版本**（开发阶段破坏性更新）：数据文件采用严格 schema——字段一律完整序列化（可选字段 `None` 存 `null`），**不做** `#[serde(default)]` 兜底；旧版格式（纯数组 / 缺必填字段）文件解析失败时写入 `app.error` 由 UI 提示，不做自动迁移（可选 `Option` 字段缺省等同 `null` 属 serde 固有语义）。
+6. **项目语义**：项目名 trim 后非空且不重名；项目添加走弹窗（`OpenProjectDialog` / `SubmitProjectDialog`），可带可选起止时间（`Project.started_at` / `finished_at`；**开始必须早于结束**）；编辑走侧边栏**内联表单**（`StartEditProject` / `SaveEditProject`，名称 + 起止时间可改，**重名校验排除自身**）；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
 7. **新任务插在最前**（`todos.insert(0, ...)`）；**任务添加统一走「＋ 添加任务」弹窗**（`SubmitAddDialog`，`App.input` / 快捷输入行已移除）；标题 / 描述 / 项目名输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）；优先级（`Option<Priority>`）在弹窗 / 编辑表单设置，未设置不显示徽章、排序排最后；弹窗校验不过（空白标题 / 截止时间格式非法 / 项目不存在）时弹窗保持打开、输入保留；时间取自 `app.now`。
 8. **侧边栏收放、弹窗表单、归档开关与编辑表单是纯 UI 状态**（`App.sidebar_visible` / `App.add_dialog` / `App.project_dialog` / `App.show_completed` / `App.project_edit` / `App.todo_edit`）：只存内存、**不参与持久化**，启动默认收起 / 关闭 / 无编辑；`ToggleSidebar`、各弹窗与编辑表单的打开/关闭/输入变化均不触发落盘（`SubmitAddDialog` 创建成功、`SubmitProjectDialog` 创建成功、`SaveEditProject` / `SaveEditTodo` 保存成功才落盘）；任务 / 项目 / 归档三个弹窗**互斥**（打开一个关闭其余）。
-    **例外：排序偏好持久化**（`App.sort_mode` / `App.project_sort_mode`，R22/R24）——随 Store 落盘（`Store.sort_mode` / `project_sort_mode`，serde 缺省兼容旧文件）、启动经 `Loaded` 恢复，`SortModeChanged` / `ProjectSortModeChanged` 切换即触发落盘。
+    **例外：排序偏好持久化**（`App.sort_mode` / `App.project_sort_mode`，R22/R24）——随 Store 落盘（`Store.sort_mode` / `project_sort_mode`）、启动经 `Loaded` 恢复，`SortModeChanged` / `ProjectSortModeChanged` 切换即触发落盘。
 9. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。
 10. **错误不崩溃**：数据文件缺失视为空数据；损坏 JSON 返回错误并显示在 UI（`app.error`），绝不 panic。
 11. **UI 文案与代码注释使用中文**；模块级 `//!` + 公开项 `///` 文档注释是标配。

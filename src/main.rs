@@ -1,4 +1,4 @@
-//! Iced Todos 桌面应用 —— 程序入口。
+//! Quick Todo 桌面应用 —— 程序入口。
 //!
 //! 使用 iced 0.14 的函数式 API（`iced::application`）装配整个应用：
 //! boot 初始化状态并异步加载数据，update 处理消息，view 渲染界面，
@@ -18,7 +18,7 @@ use view::view;
 
 pub fn main() -> iced::Result {
     iced::application(boot, update, view)
-        .title("待办清单 · Iced Todos")
+        .title("待办清单 · Quick Todo")
         .theme(Theme::Dark)
         .window(iced::window::Settings {
             min_size: Some(Size::new(480.0, 360.0)),

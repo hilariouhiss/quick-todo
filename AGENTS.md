@@ -1,6 +1,6 @@
 ---
-project: iced-demo
-description: Iced Todos 桌面待办应用 —— Rust + iced 0.14（Elm 架构），带时间追踪与 JSON 持久化
+project: quick-todo
+description: Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构），带时间追踪与 JSON 持久化
 ---
 
 # AGENTS.md
@@ -68,7 +68,7 @@ docs/
 2. **update 是纯函数。** 所有时间戳一律取自 `app.now`（由每秒 `Tick` 消息刷新），**不要**在 update 里直接调用 `Utc::now()`。副作用只通过返回的 `Task` 表达。
 3. **时间统一 UTC 存储**（`DateTime<Utc>`），仅在 view 层用 `chrono::Local` 格式化展示。
 4. **持久化 fire-and-forget**：每次状态变更后把整个 `Store`（todos + projects）`serde_json::to_string_pretty` 序列化，经 `Task::perform(storage::save, Message::Saved)` 异步写盘；`Saved` 成功消息静默，失败写入 `app.error`。不引入增量同步。
-5. **数据向后兼容**：`Todo.project_id` 与 `Todo.description` 带 `#[serde(default)]`；`storage::load` 对旧版纯数组格式自动迁移为 `Store`，不得破坏旧数据。
+5. **数据向后兼容**：`Todo.project_id` 与 `Todo.description` 带 `#[serde(default)]`；`storage::load` 对旧版纯数组格式自动迁移为 `Store`；数据目录重命名后（`iced-todos` → `quick-todo`），`storage::load` 在新路径缺失时自动回退旧路径加载（一次性迁移），不得破坏旧数据。
 6. **项目语义**：项目名 trim 后非空且不重名；项目添加走弹窗（`OpenProjectDialog` / `SubmitProjectDialog`），可带可选起止时间（`Project.started_at` / `finished_at`，`#[serde(default)]` 兼容旧数据；**开始必须早于结束**）；编辑走侧边栏**内联表单**（`StartEditProject` / `SaveEditProject`，名称 + 起止时间可改，**重名校验排除自身**）；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
 7. **新任务插在最前**（`todos.insert(0, ...)`）；**任务添加统一走「＋ 添加任务」弹窗**（`SubmitAddDialog`，`App.input` / 快捷输入行已移除）；标题 / 描述 / 项目名输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）；优先级（`Option<Priority>`）在弹窗 / 编辑表单设置，未设置不显示徽章、排序排最后；弹窗校验不过（空白标题 / 截止时间格式非法 / 项目不存在）时弹窗保持打开、输入保留；时间取自 `app.now`。
 8. **侧边栏收放、弹窗表单、归档开关与编辑表单是纯 UI 状态**（`App.sidebar_visible` / `App.add_dialog` / `App.project_dialog` / `App.show_completed` / `App.project_edit` / `App.todo_edit`）：只存内存、**不参与持久化**，启动默认收起 / 关闭 / 无编辑；`ToggleSidebar`、各弹窗与编辑表单的打开/关闭/输入变化均不触发落盘（`SubmitAddDialog` 创建成功、`SubmitProjectDialog` 创建成功、`SaveEditProject` / `SaveEditTodo` 保存成功才落盘）；任务 / 项目 / 归档三个弹窗**互斥**（打开一个关闭其余）。

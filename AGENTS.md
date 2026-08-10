@@ -1,6 +1,6 @@
 ---
 project: quick-todo
-description: Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构），带时间追踪与 JSON 持久化
+description: Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构），带时间追踪与 SQLite 持久化
 ---
 
 # AGENTS.md
@@ -19,7 +19,7 @@ description: Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构�
 - 任务区**双列分组**：左=未开始、右=进行中（组内按截止时间排序）；已完成经侧边栏按钮弹窗归档；任务添加统一走「＋ 添加任务」弹窗
 - 任务 / 项目可带可选**优先级**（无/低/中/高）；任务与项目列表可切换排序（优先级 / 截止日期 / 综合），偏好**持久化**到数据文件
 - 进行中任务显示**每秒实时**刷新耗时
-- 任务列表 JSON 持久化，重启不丢失
+- 任务 / 项目存 SQLite（quick-todo.db），排序偏好存 settings.json，重启不丢失
 - 深色主题，中文界面
 
 技术栈：
@@ -28,9 +28,9 @@ description: Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构�
 | ------------- | ----------------------------------------------------------------------------- |
 | 语言 / 工具链 | Rust edition 2024（rustc / cargo 1.97.x）                                     |
 | UI 框架       | iced 0.14，函数式 API（`iced::application`），特性：tokio、debug、time-travel |
-| 时间          | chrono 0.4（serde 特性）                                                      |
+| 时间          | chrono 0.4                                                                    |
 | ID            | uuid v7（时间有序）                                                           |
-| 持久化        | serde_json + tokio::fs + directories                                          |
+| 持久化        | rusqlite 0.40（bundled）+ serde_json（仅 settings.json）                      |
 | 测试          | 内置单元测试 + iced_test（dev-dependency）                                    |
 
 ## 2. 常用命令
@@ -52,7 +52,7 @@ src/
 ├── model.rs    数据模型：Todo、Project、TodoStatus、App（纯数据，无 IO）
 ├── update.rs   Message 枚举 + update 纯函数（状态流转、副作用派发）
 ├── view.rs     视图：项目侧边栏（可收放）+ 任务区（输入行、任务卡片/编辑模式、时间元信息）+ 弹窗（任务/项目添加）
-├── storage.rs  持久化：异步 JSON 读写（Store = 任务 + 项目，严格 schema）
+├── storage.rs  持久化：SQLite（quick-todo.db）+ settings.json，按 Op 增量写盘
 docs/
 └── 需求与概要设计.md     需求与概要设计文档 —— 需求 R1-R27 + 非功能 N1-N7、架构图、验收标准，改行为前必读
 ```
@@ -67,18 +67,18 @@ docs/
 1. **状态由时间字段推导，不存储状态枚举。** `Todo` 只有 `created_at / started_at / finished_at` 三个时间字段，`TodoStatus`（Pending / InProgress / Done）由 `status()` 推导。时间字段是唯一事实来源——**严禁**为 `Todo` 增加持久化的状态字段，否则会破坏"状态与时间不可能不一致"的结构保证。
 2. **update 是纯函数。** 所有时间戳一律取自 `app.now`（由每秒 `Tick` 消息刷新），**不要**在 update 里直接调用 `Utc::now()`。副作用只通过返回的 `Task` 表达。
 3. **时间统一 UTC 存储**（`DateTime<Utc>`），仅在 view 层用 `chrono::Local` 格式化展示。
-4. **持久化 fire-and-forget**：每次状态变更后把整个 `Store`（todos + projects）`serde_json::to_string_pretty` 序列化，经 `Task::perform(storage::save, Message::Saved)` 异步写盘；`Saved` 成功消息静默，失败写入 `app.error`。不引入增量同步。
-5. **数据不兼容旧版本**（开发阶段破坏性更新）：数据文件采用严格 schema——字段一律完整序列化（可选字段 `None` 存 `null`），**不做** `#[serde(default)]` 兜底；旧版格式（纯数组 / 缺必填字段）文件解析失败时写入 `app.error` 由 UI 提示，不做自动迁移（可选 `Option` 字段缺省等同 `null` 属 serde 固有语义）。
+4. **持久化 fire-and-forget**：每次数据变更派发一个 `storage::Op`（携带完整行状态），经 `Task::perform(storage::apply, Message::Saved)` 在**单事务**内执行对应 SQL；排序偏好经 `storage::save_settings` 整文件覆写 `settings.json`（无读-改-写）。`Saved` 成功消息静默，失败写入 `app.error`。增量写、无写队列；rusqlite 同步 API 一律经 `spawn_blocking` 包裹，不阻塞 UI 线程。
+5. **数据不兼容旧版本**（开发阶段破坏性更新）：任务 / 项目存 SQLite 单文件（`quick-todo.db`，可执行文件同目录），schema 变更即破坏性更新——旧库不兼容直接报错，不做自动迁移；排序偏好存独立 `settings.json`（缺省「综合」）。两个文件缺失视为空数据。
 6. **项目语义**：项目名 trim 后非空且不重名；项目添加走弹窗（`OpenProjectDialog` / `SubmitProjectDialog`），可带可选起止时间（`Project.started_at` / `finished_at`；**开始必须早于结束**）；编辑走侧边栏**内联表单**（`StartEditProject` / `SaveEditProject`，名称 + 起止时间可改，**重名校验排除自身**）；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
 7. **新任务插在最前**（`todos.insert(0, ...)`）；**任务添加统一走「＋ 添加任务」弹窗**（`SubmitAddDialog`，`App.input` / 快捷输入行已移除）；标题 / 描述 / 项目名输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）；优先级（`Option<Priority>`）在弹窗 / 编辑表单设置，未设置不显示徽章、排序排最后；弹窗校验不过（空白标题 / 截止时间格式非法 / 项目不存在）时弹窗保持打开、输入保留；时间取自 `app.now`。
 8. **侧边栏收放、弹窗表单、归档开关与编辑表单是纯 UI 状态**（`App.sidebar_visible` / `App.add_dialog` / `App.project_dialog` / `App.show_completed` / `App.project_edit` / `App.todo_edit`）：只存内存、**不参与持久化**，启动默认收起 / 关闭 / 无编辑；`ToggleSidebar`、各弹窗与编辑表单的打开/关闭/输入变化均不触发落盘（`SubmitAddDialog` 创建成功、`SubmitProjectDialog` 创建成功、`SaveEditProject` / `SaveEditTodo` 保存成功才落盘）；任务 / 项目 / 归档三个弹窗**互斥**（打开一个关闭其余）。
-    **例外：排序偏好持久化**（`App.sort_mode` / `App.project_sort_mode`，R22/R24）——随 Store 落盘（`Store.sort_mode` / `project_sort_mode`）、启动经 `Loaded` 恢复，`SortModeChanged` / `ProjectSortModeChanged` 切换即触发落盘。
+    **例外：排序偏好持久化**（`App.sort_mode` / `App.project_sort_mode`，R22/R24）——存独立 `settings.json`（`storage::save_settings`，不入 SQLite）、启动经 `Loaded` 恢复，`SortModeChanged` / `ProjectSortModeChanged` 切换即触发落盘。
 9. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。
-10. **错误不崩溃**：数据文件缺失视为空数据；损坏 JSON 返回错误并显示在 UI（`app.error`），绝不 panic。
+10. **错误不崩溃**：数据文件缺失视为空数据；损坏数据库 / settings.json 返回错误并显示在 UI（`app.error`），绝不 panic。
 11. **UI 文案与代码注释使用中文**；模块级 `//!` + 公开项 `///` 文档注释是标配。
 12. **卡片默认只读，修改须进编辑模式**：主界面任务卡片全部属性只读展示（项目归属也是只读文字，无 `AssignProject` 消息——归属只能经编辑模式保存）；点击「编辑」进入该卡片的编辑模式（即"当前任务"，`App.todo_edit`），可改标题 / 描述 / 项目 / 截止时间，保存校验同弹窗；**时间字段（创建 / 开始 / 结束）永不直接编辑**（自动记录，状态由它们推导）；切换编辑其他卡片时未保存修改被丢弃。
 13. **双列分组与归档**：任务区双列——左=未开始、右=进行中（各自独立滚动，组内按排序偏好排序、未设置均排最后、稳定排序，`Todo::due_order_key` / `priority_order_key` / `combined_order_key` 为排序键）；已完成任务不进双列，经侧边栏「已完成 (N)」按钮弹窗归档（按 `finished_at` 降序，**不受排序偏好影响**）；分组 / 排序属派生展示，放 view 内部私有函数，update 层不改列表顺序。
-14. **排序偏好与优先级**：任务区与侧边栏各自独立排序下拉（`sort_mode` / `project_sort_mode`，值：优先级 / 截止日期 / 综合=优先级优先同级按截止）；「综合」的截止键：任务=`due_at`、项目=`finished_at`（项目结束时间即截止日期）；「全部」行恒在项目列表最前；优先级展示：卡片徽章「高/中/低」（高红/中橙/低灰）、侧边栏项目行彩色圆点；`Priority`（低<中<高）与 `SortMode`（JSON 存英文变体名，缺省 `Combined`）派生 `Serialize/Deserialize/Default`。
+14. **排序偏好与优先级**：任务区与侧边栏各自独立排序下拉（`sort_mode` / `project_sort_mode`，值：优先级 / 截止日期 / 综合=优先级优先同级按截止）；「综合」的截止键：任务=`due_at`、项目=`finished_at`（项目结束时间即截止日期）；「全部」行恒在项目列表最前；优先级展示：卡片徽章「高/中/低」（高红/中橙/低灰）、侧边栏项目行彩色圆点；`Priority`（低<中<高，不序列化）与 `SortMode`（库 / settings.json 存英文变体名，缺省 `Combined`）——`SortMode` 派生 `Serialize/Deserialize/Default`。
 
 ## 5. 代码风格
 
@@ -92,9 +92,9 @@ docs/
 
 - 测试写在各模块内 `#[cfg(test)] mod tests`，与被测代码同文件。
 - 纯逻辑用 `#[test]`；异步（storage IO）用 `#[tokio::test]`。
-- storage 测试使用临时文件（`std::env::temp_dir()` + 进程 id 命名），用后删除。
+- storage 测试使用临时文件（`std::env::temp_dir()` + 进程 id 命名，临时 `.db` / `settings.json`），用后删除。
 - 时间相关测试用固定时间戳（`Utc.timestamp_opt(...)`）构造，不用 `Utc::now()` 断言。
-- **任何新的 Message / 状态流转 / 序列化变更必须补对应测试**，`cargo test` 全绿是交付前提。
+- **任何新的 Message / 状态流转 / 持久化变更必须补对应测试**，`cargo test` 全绿是交付前提。
 
 ## 7. iced 0.14 要点与陷阱
 

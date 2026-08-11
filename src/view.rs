@@ -364,7 +364,7 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
             .size(FONT_BODY)
             .color(s.muted)
             .width(Length::Fixed(LABEL_WIDTH)),
-        text_input("2026-01-31 或 2026-01-31 18:30", &dialog.due_input)
+        text_input("2026-01-31 或 2026-01-31 18:30", &dialog.due.input)
             .on_input(Message::DialogDueChanged)
             .on_submit(Message::SubmitAddDialog)
             .padding(10)
@@ -395,14 +395,14 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     ]
     .spacing(SPACE_L);
 
-    if let Err(hint) = &dialog.due_parsed {
+    if let Err(hint) = &dialog.due.parsed {
         form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
 
     // 按钮行：标题为空或截止时间非法时"创建"禁用（单一来源 validate 模块）
     let issues = validate::todo_form_issues(
         &dialog.title,
-        &dialog.due_parsed,
+        &dialog.due.parsed,
         dialog.project_id,
         &app.projects,
     );
@@ -448,11 +448,11 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         .padding(10);
 
     // 开始 / 结束时间（可选）：回车提交，实时解析校验
-    let start_input = text_input("2026-01-31 或 2026-01-31 18:30", &dialog.start_input)
+    let start_input = text_input("2026-01-31 或 2026-01-31 18:30", &dialog.start.input)
         .on_input(Message::ProjectStartChanged)
         .on_submit(Message::SubmitProjectDialog)
         .padding(10);
-    let end_input = text_input("2026-01-31 或 2026-01-31 18:30", &dialog.end_input)
+    let end_input = text_input("2026-01-31 或 2026-01-31 18:30", &dialog.end.input)
         .on_input(Message::ProjectEndChanged)
         .on_submit(Message::SubmitProjectDialog)
         .padding(10);
@@ -461,8 +461,8 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     let issues = validate::project_form_issues(
         &dialog.name,
         None,
-        &dialog.start_parsed,
-        &dialog.end_parsed,
+        &dialog.start.parsed,
+        &dialog.end.parsed,
         &app.projects,
     );
 
@@ -481,10 +481,10 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     ]
     .spacing(SPACE_L);
 
-    if let Err(hint) = &dialog.start_parsed {
+    if let Err(hint) = &dialog.start.parsed {
         form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
-    if let Err(hint) = &dialog.end_parsed {
+    if let Err(hint) = &dialog.end.parsed {
         form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
     if issues.name_conflict {
@@ -828,8 +828,8 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
     let issues = validate::project_form_issues(
         &edit.name,
         Some(edit.project_id),
-        &edit.start_parsed,
-        &edit.end_parsed,
+        &edit.start.parsed,
+        &edit.end.parsed,
         &app.projects,
     );
 
@@ -859,14 +859,14 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
                 app,
                 "开始时间",
                 "2026-01-31",
-                &edit.start_input,
+                &edit.start.input,
                 Message::ProjectEditStartChanged,
             ),
             labeled_input(
                 app,
                 "结束时间",
                 "2026-01-31",
-                &edit.end_input,
+                &edit.end.input,
                 Message::ProjectEditEndChanged,
             ),
         ]
@@ -874,10 +874,10 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
     ]
     .spacing(SPACE_M);
 
-    if let Err(hint) = &edit.start_parsed {
+    if let Err(hint) = &edit.start.parsed {
         form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
-    if let Err(hint) = &edit.end_parsed {
+    if let Err(hint) = &edit.end.parsed {
         form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
     if issues.name_conflict {
@@ -1368,7 +1368,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
             .size(FONT_BODY)
             .color(s.muted)
             .width(Length::Fixed(LABEL_WIDTH)),
-        text_input("2026-01-31 或 2026-01-31 18:30", &edit.due_input)
+        text_input("2026-01-31 或 2026-01-31 18:30", &edit.due.input)
             .on_input(Message::EditDueChanged)
             .on_submit(Message::SaveEditTodo)
             .padding(8)
@@ -1407,14 +1407,14 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         due_row
     ]
     .spacing(SPACE_M);
-    if let Err(hint) = &edit.due_parsed {
+    if let Err(hint) = &edit.due.parsed {
         form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
 
     // 底部操作行：保存 / 取消（与只读卡片的「编辑」按钮位置对称；单一来源 validate 模块）
     let issues = validate::todo_form_issues(
         &edit.title,
-        &edit.due_parsed,
+        &edit.due.parsed,
         edit.project_id,
         &app.projects,
     );

@@ -9,8 +9,8 @@ use iced::Task;
 use uuid::Uuid;
 
 use crate::model::{
-    AddDialog, App, Priority, Project, ProjectDialog, ProjectEdit, QuickDue, SortMode, Todo,
-    TodoEdit, TodoStatus, format_due, parse_datetime,
+    AddDialog, App, ParsedField, Priority, Project, ProjectDialog, ProjectEdit, QuickDue, SortMode,
+    Todo, TodoEdit, TodoStatus,
 };
 use crate::storage::{self, Op, Store};
 use crate::validate;
@@ -210,17 +210,15 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::ProjectStartChanged(text) => {
             if let Some(dialog) = &mut app.project_dialog {
-                // 实时解析：非法格式立即提示（start_parsed 缓存结果）
-                dialog.start_parsed = parse_datetime(&text);
-                dialog.start_input = text;
+                // 实时解析：非法格式立即提示（ParsedField 缓存结果）
+                dialog.start = ParsedField::changed(text);
             }
         }
 
         Message::ProjectEndChanged(text) => {
             if let Some(dialog) = &mut app.project_dialog {
-                // 实时解析：非法格式立即提示（end_parsed 缓存结果）
-                dialog.end_parsed = parse_datetime(&text);
-                dialog.end_input = text;
+                // 实时解析：非法格式立即提示（ParsedField 缓存结果）
+                dialog.end = ParsedField::changed(text);
             }
         }
 
@@ -241,8 +239,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let (name, started_at, finished_at) = match validate::project_form_values(
                 &dialog.name,
                 None,
-                &dialog.start_parsed,
-                &dialog.end_parsed,
+                &dialog.start.parsed,
+                &dialog.end.parsed,
                 &app.projects,
             ) {
                 Ok(values) => values,
@@ -291,15 +289,13 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::StartEditProject(id) => {
             if let Some(project) = app.projects.iter().find(|p| p.id == id) {
-                // 预填当前字段；起止时间回填为可解析文本（分钟粒度）
+                // 预填当前字段；起止时间经 ParsedField 回填为可解析文本（分钟粒度）
                 app.project_edit = Some(ProjectEdit {
                     project_id: id,
                     name: project.name.clone(),
                     priority: project.priority,
-                    start_input: project.started_at.map(format_due).unwrap_or_default(),
-                    start_parsed: Ok(project.started_at),
-                    end_input: project.finished_at.map(format_due).unwrap_or_default(),
-                    end_parsed: Ok(project.finished_at),
+                    start: ParsedField::prefilled(project.started_at),
+                    end: ParsedField::prefilled(project.finished_at),
                 });
                 // 聚焦编辑名称输入框（下一次渲染生效）
                 return iced::widget::operation::focus(PROJECT_EDIT_NAME_ID);
@@ -314,17 +310,15 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::ProjectEditStartChanged(text) => {
             if let Some(edit) = &mut app.project_edit {
-                // 实时解析：非法格式立即提示（start_parsed 缓存结果）
-                edit.start_parsed = parse_datetime(&text);
-                edit.start_input = text;
+                // 实时解析：非法格式立即提示（ParsedField 缓存结果）
+                edit.start = ParsedField::changed(text);
             }
         }
 
         Message::ProjectEditEndChanged(text) => {
             if let Some(edit) = &mut app.project_edit {
-                // 实时解析：非法格式立即提示（end_parsed 缓存结果）
-                edit.end_parsed = parse_datetime(&text);
-                edit.end_input = text;
+                // 实时解析：非法格式立即提示（ParsedField 缓存结果）
+                edit.end = ParsedField::changed(text);
             }
         }
 
@@ -345,8 +339,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let (name, started_at, finished_at) = match validate::project_form_values(
                 &edit.name,
                 Some(edit.project_id),
-                &edit.start_parsed,
-                &edit.end_parsed,
+                &edit.start.parsed,
+                &edit.end.parsed,
                 &app.projects,
             ) {
                 Ok(values) => values,
@@ -470,18 +464,15 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::DialogDueChanged(text) => {
             if let Some(dialog) = &mut app.add_dialog {
-                // 实时解析：非法格式立即提示（due_parsed 缓存结果）
-                dialog.due_parsed = parse_datetime(&text);
-                dialog.due_input = text;
+                // 实时解析：非法格式立即提示（ParsedField 缓存结果）
+                dialog.due = ParsedField::changed(text);
             }
         }
 
         Message::DialogQuickDue(quick) => {
             if let Some(dialog) = &mut app.add_dialog {
                 // 快捷时间：基于 app.now 的本地时区计算，回填文本后走统一解析
-                let text = quick.due_text(app.now);
-                dialog.due_parsed = parse_datetime(&text);
-                dialog.due_input = text;
+                dialog.due = ParsedField::changed(quick.due_text(app.now));
             }
         }
 
@@ -506,7 +497,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // 校验单一来源（validate 模块）：空白标题 / 时间非法 / 项目不存在
             let (title, due_at) = match validate::todo_form_values(
                 &dialog.title,
-                &dialog.due_parsed,
+                &dialog.due.parsed,
                 dialog.project_id,
                 &app.projects,
             ) {
@@ -543,15 +534,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::EditTodo(id) => {
             if let Some(todo) = app.todos.iter().find(|todo| todo.id == id) {
-                // 预填当前字段；截止时间回填为可解析文本（分钟粒度）
+                // 预填当前字段；截止时间经 ParsedField 回填为可解析文本（分钟粒度）
                 app.todo_edit = Some(TodoEdit {
                     todo_id: id,
                     title: todo.title.clone(),
                     description: todo.description.clone(),
                     priority: todo.priority,
                     project_id: todo.project_id,
-                    due_input: todo.due_at.map(format_due).unwrap_or_default(),
-                    due_parsed: Ok(todo.due_at),
+                    due: ParsedField::prefilled(todo.due_at),
                 });
             }
         }
@@ -591,18 +581,15 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::EditDueChanged(text) => {
             if let Some(edit) = &mut app.todo_edit {
-                // 实时解析：非法格式立即提示（due_parsed 缓存结果）
-                edit.due_parsed = parse_datetime(&text);
-                edit.due_input = text;
+                // 实时解析：非法格式立即提示（ParsedField 缓存结果）
+                edit.due = ParsedField::changed(text);
             }
         }
 
         Message::EditQuickDue(quick) => {
             if let Some(edit) = &mut app.todo_edit {
                 // 快捷时间：基于 app.now 的本地时区计算，回填文本后走统一解析
-                let text = quick.due_text(app.now);
-                edit.due_parsed = parse_datetime(&text);
-                edit.due_input = text;
+                edit.due = ParsedField::changed(quick.due_text(app.now));
             }
         }
 
@@ -616,7 +603,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // 校验单一来源（validate 模块）：空白标题 / 时间非法 / 项目不存在
             let (title, due_at) = match validate::todo_form_values(
                 &edit.title,
-                &edit.due_parsed,
+                &edit.due.parsed,
                 edit.project_id,
                 &app.projects,
             ) {
@@ -770,8 +757,8 @@ mod tests {
 
         let dialog = app.project_dialog.as_ref().unwrap();
         assert!(dialog.name.is_empty());
-        assert!(dialog.start_parsed.is_ok());
-        assert!(dialog.end_parsed.is_ok());
+        assert!(dialog.start.parsed.is_ok());
+        assert!(dialog.end.parsed.is_ok());
     }
 
     #[test]
@@ -872,8 +859,8 @@ mod tests {
 
         let dialog = app.project_dialog.as_ref().unwrap();
         assert_eq!(dialog.name, "工作");
-        assert!(dialog.start_parsed.as_ref().unwrap().is_some());
-        assert!(dialog.end_parsed.as_ref().unwrap().is_some());
+        assert!(dialog.start.parsed.as_ref().unwrap().is_some());
+        assert!(dialog.end.parsed.as_ref().unwrap().is_some());
     }
 
     #[test]
@@ -1008,10 +995,10 @@ mod tests {
         assert_eq!(edit.project_id, id);
         assert_eq!(edit.name, "工作");
         assert_eq!(edit.priority, Some(Priority::High));
-        assert!(!edit.start_input.is_empty()); // 起止时间回填为可解析文本
-        assert!(!edit.end_input.is_empty());
-        assert!(edit.start_parsed.is_ok());
-        assert!(edit.end_parsed.is_ok());
+        assert!(!edit.start.input.is_empty()); // 起止时间回填为可解析文本
+        assert!(!edit.end.input.is_empty());
+        assert!(edit.start.parsed.is_ok());
+        assert!(edit.end.parsed.is_ok());
     }
 
     #[test]
@@ -1039,8 +1026,8 @@ mod tests {
 
         let edit = app.project_edit.as_ref().unwrap();
         assert_eq!(edit.name, " 个人  ");
-        assert!(edit.start_parsed.as_ref().unwrap().is_some());
-        assert!(edit.end_parsed.as_ref().unwrap().is_some());
+        assert!(edit.start.parsed.as_ref().unwrap().is_some());
+        assert!(edit.end.parsed.as_ref().unwrap().is_some());
     }
 
     #[test]
@@ -1275,7 +1262,7 @@ mod tests {
         let dialog = app.add_dialog.as_ref().unwrap();
         assert_eq!(dialog.project_id, Some(pid)); // 预选当前筛选的项目
         assert!(dialog.title.is_empty());
-        assert_eq!(dialog.due_parsed, Ok(None)); // 截止时间默认留空
+        assert_eq!(dialog.due.parsed, Ok(None)); // 截止时间默认留空
     }
 
     #[test]
@@ -1318,7 +1305,7 @@ mod tests {
         assert_eq!(dialog.title, "写方案");
         assert_eq!(dialog.description, "先读需求");
         assert_eq!(dialog.project_id, Some(pid));
-        assert!(dialog.due_parsed.as_ref().unwrap().is_some());
+        assert!(dialog.due.parsed.as_ref().unwrap().is_some());
     }
 
     #[test]
@@ -1345,7 +1332,7 @@ mod tests {
         let mut app = App::default();
         let _ = update(&mut app, Message::OpenAddDialog);
         let _ = update(&mut app, Message::DialogDueChanged("后天".into()));
-        assert!(app.add_dialog.as_ref().unwrap().due_parsed.is_err());
+        assert!(app.add_dialog.as_ref().unwrap().due.parsed.is_err());
     }
 
     #[test]
@@ -1356,8 +1343,8 @@ mod tests {
         let _ = update(&mut app, Message::DialogQuickDue(QuickDue::Tomorrow));
 
         let dialog = app.add_dialog.as_ref().unwrap();
-        assert!(dialog.due_input.contains("23:59")); // 回填文本
-        assert!(dialog.due_parsed.as_ref().unwrap().is_some()); // 可解析
+        assert!(dialog.due.input.contains("23:59")); // 回填文本
+        assert!(dialog.due.parsed.as_ref().unwrap().is_some()); // 可解析
     }
 
     #[test]
@@ -1462,8 +1449,8 @@ mod tests {
         assert_eq!(edit.description, "先读需求");
         assert_eq!(edit.priority, Some(Priority::Medium));
         assert_eq!(edit.project_id, Some(pid));
-        assert!(!edit.due_input.is_empty()); // 截止时间回填为可解析文本
-        assert!(edit.due_parsed.is_ok());
+        assert!(!edit.due.input.is_empty()); // 截止时间回填为可解析文本
+        assert!(edit.due.parsed.is_ok());
     }
 
     #[test]
@@ -1489,7 +1476,7 @@ mod tests {
         assert_eq!(edit.title, " 改标题 ");
         assert_eq!(edit.description, "新描述");
         assert_eq!(edit.project_id, Some(pid));
-        assert!(edit.due_parsed.as_ref().unwrap().is_some());
+        assert!(edit.due.parsed.as_ref().unwrap().is_some());
     }
 
     #[test]
@@ -1518,8 +1505,8 @@ mod tests {
         let _ = update(&mut app, Message::EditQuickDue(QuickDue::Tomorrow));
 
         let edit = app.todo_edit.as_ref().unwrap();
-        assert!(edit.due_input.contains("23:59")); // 回填文本
-        assert!(edit.due_parsed.as_ref().unwrap().is_some()); // 可解析
+        assert!(edit.due.input.contains("23:59")); // 回填文本
+        assert!(edit.due.parsed.as_ref().unwrap().is_some()); // 可解析
     }
 
     #[test]

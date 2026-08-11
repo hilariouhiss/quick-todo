@@ -278,6 +278,48 @@ impl Project {
     }
 }
 
+/// 时间输入框的"原文 + 实时解析结果"缓存对（任务截止时间 / 项目起止时间共用）。
+/// 输入变化即实时解析（非法格式立即提示），提交时复用缓存结果做最终校验。
+#[derive(Debug, Clone)]
+pub struct ParsedField {
+    /// 输入框的原始文本
+    pub input: String,
+    /// 实时解析结果：`Ok(None)` = 留空；`Ok(Some)` = 解析成功；`Err` = 格式错误提示
+    pub parsed: Result<Option<DateTime<Utc>>, String>,
+}
+
+impl ParsedField {
+    /// 空输入（未设置）。
+    pub fn new() -> Self {
+        Self {
+            input: String::new(),
+            parsed: Ok(None),
+        }
+    }
+
+    /// 输入变化：记录原文并实时解析（非法格式立即得到 `Err` 提示）。
+    pub fn changed(text: String) -> Self {
+        Self {
+            parsed: parse_datetime(&text),
+            input: text,
+        }
+    }
+
+    /// 由既有值预填：原文回填为可解析文本（分钟粒度），解析结果直接取既有值。
+    pub fn prefilled(value: Option<DateTime<Utc>>) -> Self {
+        Self {
+            input: value.map(format_due).unwrap_or_default(),
+            parsed: Ok(value),
+        }
+    }
+}
+
+impl Default for ParsedField {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 弹窗添加任务的表单状态（纯内存，不持久化；`App.add_dialog = None` 表示弹窗关闭）。
 /// 所属项目的快速新建入口见 `OpenQuickProjectDialog`：弹出与标题栏相同的新建项目弹窗，
 /// 创建成功后自动选中新项目（`project_id`），任务弹窗本身不持有快速新建状态。
@@ -291,11 +333,8 @@ pub struct AddDialog {
     pub priority: Option<Priority>,
     /// 所属项目（`None` = 无项目）
     pub project_id: Option<Uuid>,
-    /// 截止时间输入框的原始文本
-    pub due_input: String,
-    /// 截止时间的实时解析结果：
-    /// `Ok(None)` = 留空；`Ok(Some)` = 解析成功；`Err` = 格式错误提示
-    pub due_parsed: Result<Option<DateTime<Utc>>, String>,
+    /// 截止时间输入框的原文 + 实时解析结果
+    pub due: ParsedField,
 }
 
 impl Default for AddDialog {
@@ -305,8 +344,7 @@ impl Default for AddDialog {
             description: String::new(),
             priority: None,
             project_id: None,
-            due_input: String::new(),
-            due_parsed: Ok(None),
+            due: ParsedField::new(),
         }
     }
 }
@@ -318,15 +356,10 @@ pub struct ProjectDialog {
     pub name: String,
     /// 优先级（`None` = 无）
     pub priority: Option<Priority>,
-    /// 开始时间输入框的原始文本
-    pub start_input: String,
-    /// 开始时间的实时解析结果：
-    /// `Ok(None)` = 留空；`Ok(Some)` = 解析成功；`Err` = 格式错误提示
-    pub start_parsed: Result<Option<DateTime<Utc>>, String>,
-    /// 结束时间输入框的原始文本
-    pub end_input: String,
-    /// 结束时间的实时解析结果（同 `start_parsed`）
-    pub end_parsed: Result<Option<DateTime<Utc>>, String>,
+    /// 开始时间输入框的原文 + 实时解析结果
+    pub start: ParsedField,
+    /// 结束时间输入框的原文 + 实时解析结果
+    pub end: ParsedField,
 }
 
 impl Default for ProjectDialog {
@@ -334,10 +367,8 @@ impl Default for ProjectDialog {
         Self {
             name: String::new(),
             priority: None,
-            start_input: String::new(),
-            start_parsed: Ok(None),
-            end_input: String::new(),
-            end_parsed: Ok(None),
+            start: ParsedField::new(),
+            end: ParsedField::new(),
         }
     }
 }
@@ -351,14 +382,10 @@ pub struct ProjectEdit {
     pub name: String,
     /// 优先级（`None` = 无）
     pub priority: Option<Priority>,
-    /// 开始时间输入框的原始文本
-    pub start_input: String,
-    /// 开始时间的实时解析结果（同 `ProjectDialog.start_parsed`）
-    pub start_parsed: Result<Option<DateTime<Utc>>, String>,
-    /// 结束时间输入框的原始文本
-    pub end_input: String,
-    /// 结束时间的实时解析结果（同 `ProjectDialog.end_parsed`）
-    pub end_parsed: Result<Option<DateTime<Utc>>, String>,
+    /// 开始时间输入框的原文 + 实时解析结果
+    pub start: ParsedField,
+    /// 结束时间输入框的原文 + 实时解析结果
+    pub end: ParsedField,
 }
 
 /// 卡片编辑任务的表单状态（纯内存，不持久化；`App.todo_edit = None` 表示无卡片处于编辑态）。
@@ -375,11 +402,8 @@ pub struct TodoEdit {
     pub priority: Option<Priority>,
     /// 所属项目（`None` = 无项目）
     pub project_id: Option<Uuid>,
-    /// 截止时间输入框的原始文本
-    pub due_input: String,
-    /// 截止时间的实时解析结果：
-    /// `Ok(None)` = 留空；`Ok(Some)` = 解析成功；`Err` = 格式错误提示
-    pub due_parsed: Result<Option<DateTime<Utc>>, String>,
+    /// 截止时间输入框的原文 + 实时解析结果
+    pub due: ParsedField,
 }
 
 /// 弹窗内截止时间的快捷选项（选中后回填到文本输入框，仍可手动修改）。
@@ -979,6 +1003,48 @@ mod tests {
                 "{text} 应可被 parse_datetime 接受"
             );
         }
+    }
+
+    // ---------- ParsedField ----------
+
+    #[test]
+    fn parsed_field_new_is_empty() {
+        let field = ParsedField::new();
+        assert!(field.input.is_empty());
+        assert_eq!(field.parsed, Ok(None));
+        assert_eq!(ParsedField::default().input, "");
+    }
+
+    #[test]
+    fn parsed_field_changed_parses_live() {
+        // 合法输入：原文 + 解析结果成对缓存
+        let field = ParsedField::changed("2026-01-31 18:30".into());
+        assert_eq!(field.input, "2026-01-31 18:30");
+        assert!(field.parsed.is_ok());
+
+        // 非法输入：立即得到错误提示
+        let field = ParsedField::changed("后天".into());
+        assert_eq!(field.input, "后天");
+        assert!(field.parsed.is_err());
+
+        // 空串：留空
+        let field = ParsedField::changed(String::new());
+        assert!(field.input.is_empty());
+        assert_eq!(field.parsed, Ok(None));
+    }
+
+    #[test]
+    fn parsed_field_prefilled_roundtrips() {
+        // 有值：原文回填为可解析文本（分钟粒度），解析结果直接取既有值（闭环）
+        let due = parse_datetime("2026-01-31 18:30").unwrap().unwrap();
+        let field = ParsedField::prefilled(Some(due));
+        assert_eq!(field.parsed, Ok(Some(due)));
+        assert_eq!(parse_datetime(&field.input).unwrap().unwrap(), due);
+
+        // 无值：空原文 + Ok(None)
+        let field = ParsedField::prefilled(None);
+        assert!(field.input.is_empty());
+        assert_eq!(field.parsed, Ok(None));
     }
 
     #[test]

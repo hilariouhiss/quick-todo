@@ -30,6 +30,8 @@ pub enum Message {
     Saved(Result<(), String>),
     /// 每秒时钟（携带当前 UTC 时间，用于实时耗时显示）
     Tick(DateTime<Utc>),
+    /// 系统主题变化（订阅 `system::theme_changes` 实时跟随；纯运行期状态，不落盘）
+    SystemThemeChanged(bool),
     /// 任务排序方式切换（持久化偏好，触发落盘）
     SortModeChanged(SortMode),
     /// 项目排序方式切换（持久化偏好，触发落盘）
@@ -160,6 +162,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::Saved(Ok(())) => {}
         Message::Saved(Err(error)) => app.error = Some(format!("保存数据失败: {error}")),
         Message::Tick(now) => app.now = now,
+
+        Message::SystemThemeChanged(dark) => {
+            // 系统主题实时跟随（订阅 `system::theme_changes`；纯运行期状态，不落盘）
+            app.system_dark = dark;
+        }
 
         Message::SortModeChanged(mode) => {
             // 排序偏好持久化：切换即落盘（settings.json 整文件覆写）
@@ -1274,6 +1281,18 @@ mod tests {
 
         let _ = update(&mut app, Message::CycleThemeMode);
         assert_eq!(app.theme_mode, ThemeMode::Light);
+    }
+
+    #[test]
+    fn system_theme_changed_updates_dark_flag() {
+        let mut app = App::default();
+        assert!(!app.system_dark); // 默认浅色（未收到系统主题前）
+
+        let _ = update(&mut app, Message::SystemThemeChanged(true));
+        assert!(app.system_dark);
+
+        let _ = update(&mut app, Message::SystemThemeChanged(false));
+        assert!(!app.system_dark);
     }
 
     #[test]

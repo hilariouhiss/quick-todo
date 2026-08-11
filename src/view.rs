@@ -3,7 +3,8 @@
 //! 布局：标题栏（分体按钮「＋ 添加任务 ▾」，下拉菜单含「＋ 添加项目」）+ 项目单行栏
 //! （左侧排序下拉 + 横向滚动芯片）+ 任务区（统一标题行：两列计数 + 右上角排序下拉 + 双列），
 //! 项目栏与任务区以卡片容器分组；底部角落条（bottom_cluster）：左下角主题指示器
-//! （Theme: Auto/Light/Dark，点击循环切换）+ 右下角分体统计（统计胶囊 +「已完成 (Y)」按钮）。
+//! （Theme: Auto/Light/Dark，胶囊外壳，点击循环切换）+ 右下角统计胶囊
+//! （共 x 项 | 进行中 x | 已完成 x，「已完成 x」为主色粗体链接，点击打开归档弹窗）。
 //! 视觉规范统一由顶部「设计令牌」常量控制（字号 / 间距 / 圆角 / 按钮规格），
 //! 颜色来自命名常量 + `extended_palette()` 主题自适应（浅 / 深主题均可读）。
 //! 每个任务一张卡片：标题、状态徽章、操作按钮、只读属性展示（含项目归属），
@@ -27,6 +28,8 @@ const MUTED: Color = Color::from_rgb(0.49, 0.52, 0.56);
 const ERROR_COLOR: Color = Color::from_rgb(0.92, 0.45, 0.45);
 /// 进行中（橙）
 const ACCENT: Color = Color::from_rgb(0.98, 0.70, 0.25);
+/// 进行中高亮（蓝）：状态徽章 / 实时耗时——浅色主题下比橙黄更清晰可读
+const BLUE: Color = Color::from_rgb(0.15, 0.40, 0.93);
 /// 已完成（绿）
 const DONE: Color = Color::from_rgb(0.36, 0.78, 0.50);
 /// 下拉菜单距窗口顶部的偏移：内容区 padding 24 + 标题行高（26px 字号 ≈34）
@@ -119,13 +122,6 @@ const BTN_CARD: iced::Padding = iced::Padding {
     top: 6.0,
     right: 14.0,
     bottom: 6.0,
-    left: 14.0,
-};
-/// 按钮规格：右下角「已完成」按钮 [8, 14]
-const BTN_FAB: iced::Padding = iced::Padding {
-    top: 8.0,
-    right: 14.0,
-    bottom: 8.0,
     left: 14.0,
 };
 
@@ -270,7 +266,7 @@ const BOLD: Font = Font {
     ..Font::DEFAULT
 };
 
-/// 应用主视图：标题栏（分体按钮 + 下拉菜单）+ 项目单行栏 + 双列任务区；底部角落条（左下主题指示器 + 右下分体统计）。
+/// 应用主视图：标题栏（分体按钮 + 下拉菜单）+ 项目单行栏 + 双列任务区；底部角落条（左下主题指示器 + 右下统计胶囊）。
 /// 任一弹窗（任务添加 / 项目添加编辑 / 已完成归档）打开时，叠加模态遮罩与弹窗卡片。
 pub fn view(app: &App) -> Element<'_, Message> {
     // 标题栏：左侧标题；右端分体按钮（「＋ 添加任务」主按钮 + 「▾」下拉箭头，
@@ -344,7 +340,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .padding(PADDING_PAGE)
         .center_x(Length::Fill);
 
-    // 底部角落条（左下主题指示器 + 右下分体统计；叠加在内容之上、弹窗遮罩之下）
+    // 底部角落条（左下主题指示器 + 右下统计胶囊；叠加在内容之上、弹窗遮罩之下）
     // 下拉菜单展开时：再叠 透明捕获层（点击外部关闭，无压暗）+ 右上角菜单卡片（最顶层）
     let content = if app.add_menu_open {
         stack![
@@ -727,17 +723,6 @@ fn form_field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Ele
         .into()
 }
 
-/// 右下角统计胶囊文案：总数 / 进行中（已完成计数在「已完成 (Y)」按钮上，见 `stats_group`）。
-fn summary(app: &App) -> String {
-    let total = app.todos.len();
-    let in_progress = app
-        .todos
-        .iter()
-        .filter(|todo| todo.status() == TodoStatus::InProgress)
-        .count();
-    format!("共 {total} 项 · 进行中 {in_progress}")
-}
-
 /// 空列表提示（整区空 / 组内空均垂直居中）。
 fn empty_hint(message: &'static str) -> Element<'static, Message> {
     container(text(message).size(FONT_HEADER).color(MUTED))
@@ -1054,35 +1039,63 @@ fn bottom_cluster(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// 左下角主题指示器：`Theme: Auto/Light/Dark`（无 tooltip），点击循环切换主题模式。
+/// 左下角主题指示器：`Theme: Auto/Light/Dark`（无 tooltip），点击循环切换主题模式；
+/// 胶囊外壳（复用项目芯片样式：弱色底 + 描边 + 胶囊圆角 + 悬停加深），与其他组件风格统一。
 fn theme_indicator(app: &App) -> Element<'_, Message> {
-    button(text(format!("Theme: {}", app.theme_mode.label())).size(FONT_SMALL))
+    button(text(format!("Theme: {}", app.theme_mode.label())).size(FONT_BODY))
         .on_press(Message::CycleThemeMode)
-        .style(button::text)
-        .padding(BTN_SMALL)
+        .style(|theme, status| project_chip_style(theme, status, false))
+        .padding(BTN_MEDIUM)
         .into()
 }
 
-/// 右下角分体统计：左侧统计胶囊（纯展示，不可点）+ 右侧「已完成 (Y)」按钮（打开归档弹窗）。
-/// 两段 1px 衔接、同高（13px 字号 + 16px 垂直内边距 = 29px），视觉上为一个整体。
+/// 右下角分体统计：`共 x 项 | 进行中 x | 已完成 x` 单行胶囊（`summary_pill_style` 外壳）；
+/// 「已完成 x」为可点击链接（主色 + 粗体，悬停加深），打开归档弹窗；其余段纯展示。
 fn stats_group(app: &App) -> Element<'_, Message> {
+    let total = app.todos.len();
+    let in_progress = app
+        .todos
+        .iter()
+        .filter(|todo| todo.status() == TodoStatus::InProgress)
+        .count();
     let done = app
         .todos
         .iter()
         .filter(|todo| todo.status() == TodoStatus::Done)
         .count();
-    row![
-        container(text(summary(app)).size(FONT_BODY).color(MUTED))
-            .padding([8.0, SPACE_L])
-            .style(summary_pill_style),
-        button(text(format!("已完成 ({done})")).size(FONT_BODY))
-            .on_press(Message::OpenCompletedDialog)
-            .style(button::secondary)
-            .padding(BTN_FAB),
-    ]
-    .spacing(1)
-    .align_y(Alignment::Center)
+    container(
+        row![
+            text(format!("共 {total} 项")).size(FONT_BODY),
+            text(" | ").size(FONT_BODY).color(MUTED),
+            text(format!("进行中 {in_progress}")).size(FONT_BODY),
+            text(" | ").size(FONT_BODY).color(MUTED),
+            button(text(format!("已完成 {done}")).size(FONT_BODY).font(BOLD))
+                .on_press(Message::OpenCompletedDialog)
+                .style(link_button_style),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(SPACE_XS),
+    )
+    .padding([6.0, SPACE_L])
+    .style(summary_pill_style)
     .into()
+}
+
+/// 链接按钮样式：无背景，主色文字（悬停加深）——用于「已完成 x」可点击入口。
+fn link_button_style(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let base = button::Style {
+        background: None,
+        text_color: palette.primary.base.color,
+        ..Default::default()
+    };
+    match status {
+        button::Status::Hovered => button::Style {
+            text_color: palette.primary.strong.color,
+            ..base
+        },
+        _ => base,
+    }
 }
 
 /// 摘要胶囊样式：弱色底 + 胶囊圆角（悬浮在滚动内容上时可读）。
@@ -1302,11 +1315,11 @@ fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         .into()
 }
 
-/// 状态徽章颜色：未开始＝灰、进行中＝橙、已完成＝绿。
+/// 状态徽章颜色：未开始＝灰、进行中＝蓝、已完成＝绿。
 fn status_color(status: TodoStatus) -> Color {
     match status {
         TodoStatus::Pending => MUTED,
-        TodoStatus::InProgress => ACCENT,
+        TodoStatus::InProgress => BLUE,
         TodoStatus::Done => DONE,
     }
 }
@@ -1607,7 +1620,7 @@ fn time_meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
             .duration(app.now)
             .map(format_duration)
             .unwrap_or_else(|| "—".into());
-        meta = meta.push(time_row("已耗时", format!("{elapsed}（实时）"), ACCENT));
+        meta = meta.push(time_row("已耗时", format!("{elapsed}（实时）"), BLUE));
     }
 
     meta = meta.push(time_row(

@@ -499,6 +499,9 @@ pub struct App {
     pub project_sort_mode: SortMode,
     /// 主题模式（**持久化偏好**，启动经 `Loaded` 恢复，缺省「跟随系统」）
     pub theme_mode: ThemeMode,
+    /// 系统当前是否为深色模式（运行期订阅 `system::theme_changes` 实时更新，**不持久化**；
+    /// 供「跟随系统」模式显式映射主题，避免 iced `None` 跟随的边框 / 内容分裂）
+    pub system_dark: bool,
 }
 
 impl Default for App {
@@ -518,6 +521,7 @@ impl Default for App {
             sort_mode: SortMode::default(),
             project_sort_mode: SortMode::default(),
             theme_mode: ThemeMode::default(),
+            system_dark: false,
         }
     }
 }

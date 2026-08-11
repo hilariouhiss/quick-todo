@@ -19,11 +19,17 @@ use view::view;
 pub fn main() -> iced::Result {
     iced::application(boot, update, view)
         .title("待办清单 · Quick Todo")
-        // 主题：System → None（iced 原生跟随系统，切换实时生效）；
-        // Light / Dark → 固定模式（不随系统变化）
+        // 主题：System → 跟随系统主题显式映射（system_dark 经订阅实时更新）；
+        // Light / Dark → 固定模式。**恒返回 Some**——iced 的 None 跟随（`Theme::default`）
+        // 在“手动模式 → Auto”切换时用旧模式解析默认主题，且原生窗口边框先跟随系统，
+        // 造成“边框白 / 内容深”分裂；显式映射保证窗口背景与内容始终一致
         .theme(|app: &App| -> Option<Theme> {
             match app.theme_mode {
-                ThemeMode::System => None,
+                ThemeMode::System => Some(if app.system_dark {
+                    Theme::Dark
+                } else {
+                    Theme::Light
+                }),
                 ThemeMode::Light => Some(Theme::Light),
                 ThemeMode::Dark => Some(Theme::Dark),
             }
@@ -37,15 +43,21 @@ pub fn main() -> iced::Result {
         .run()
 }
 
-/// 应用启动：初始化状态，并异步加载持久化的任务列表。
+/// 应用启动：初始化状态，异步加载持久化的任务列表，并获取当前系统主题。
 fn boot() -> (App, Task<Message>) {
     (
         App::default(),
-        Task::perform(storage::load(), Message::Loaded),
+        Task::batch([
+            Task::perform(storage::load(), Message::Loaded),
+            // 初始系统主题（深色？）：供「跟随系统」模式显式映射
+            iced::system::theme()
+                .map(|mode| Message::SystemThemeChanged(mode == iced::theme::Mode::Dark)),
+        ]),
     )
 }
 
 /// 每秒产生一个时钟消息，驱动"进行中"任务的实时耗时显示；
+/// 订阅系统主题变化（Auto 模式实时跟随）；
 /// 任一弹窗（任务 / 项目添加）打开时，额外监听 Esc 键关闭对应弹窗。
 fn subscription(app: &App) -> Subscription<Message> {
     let clock = Subscription::run(|| {
@@ -65,6 +77,10 @@ fn subscription(app: &App) -> Subscription<Message> {
     })
     .map(Message::Tick);
 
+    // 系统主题实时跟随（仅 Auto 模式消费；事件由 iced_winit 从 winit ThemeChanged 转发）
+    let system_theme = iced::system::theme_changes()
+        .map(|mode| Message::SystemThemeChanged(mode == iced::theme::Mode::Dark));
+
     // 任一弹窗或下拉菜单打开时：Esc 关闭当前弹窗 / 菜单（与点击遮罩等效）
     // 注意：listen_with 只接受无捕获的 fn 指针，因此固定发出 CloseActiveDialog
     if app.add_dialog.is_some()
@@ -81,8 +97,8 @@ fn subscription(app: &App) -> Subscription<Message> {
                 None
             }
         });
-        Subscription::batch([clock, esc])
+        Subscription::batch([clock, system_theme, esc])
     } else {
-        clock
+        Subscription::batch([clock, system_theme])
     }
 }

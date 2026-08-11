@@ -78,13 +78,13 @@ docs/
 11. **UI 文案与代码注释使用中文**；模块级 `//!` + 公开项 `///` 文档注释是标配。
 12. **卡片默认只读，修改须进编辑模式**：主界面任务卡片全部属性只读展示（项目归属也是只读文字，无 `AssignProject` 消息——归属只能经编辑模式保存）；点击「编辑」进入该卡片的编辑模式（即"当前任务"，`App.todo_edit`），可改标题 / 描述 / 项目 / 截止时间，保存校验同弹窗；**时间字段（创建 / 开始 / 结束）永不直接编辑**（自动记录，状态由它们推导）；切换编辑其他卡片时未保存修改被丢弃。
 13. **双列分组与归档**：任务区双列——左=未开始、右=进行中（各自独立滚动，组内按排序偏好排序、未设置均排最后、稳定排序，`Todo::due_order_key` / `priority_order_key` / `combined_order_key` 为排序键）；已完成任务不进双列，经右下角统计胶囊「已完成 x」链接弹窗归档（按 `finished_at` 降序，**不受排序偏好影响**）；分组 / 排序属派生展示，放 view 内部私有函数，update 层不改列表顺序。
-14. **排序偏好、主题模式与优先级**：任务区右上角（统一标题行右端）与项目单行栏最左侧各自独立排序下拉（均无文字标签）（`sort_mode` / `project_sort_mode`，值：优先级 / 截止日期 / 综合=优先级优先同级按截止）；「综合」的截止键：任务=`due_at`、项目=`finished_at`（项目结束时间即截止日期）；「全部」芯片恒在项目栏最前；优先级展示：卡片徽章「高/中/低」（高红/中橙/低灰）、项目芯片彩色圆点；`Priority`（低<中<高，不序列化）、`SortMode`（库 / settings.json 存英文变体名，缺省 `Combined`）与 `ThemeMode`（**System / Light / Dark，settings.json 必填键**——旧文件缺键解析失败红字提示不迁移，缺省 `System`）——`SortMode` / `ThemeMode` 派生 `Serialize/Deserialize/Default`；`.theme()` 闭包**恒返回 `Some`**：System → 按 `App.system_dark`（`iced::system::theme_changes` 订阅实时更新，不持久化）显式映射 Light / Dark，手动模式返回固定 `Theme`（iced 原生 `None` 跟随在手动 → Auto 切换时窗口边框 / 内容主题分裂，故不用）。
+14. **排序偏好、主题模式与优先级**：任务区右上角（统一标题行右端）与项目单行栏最左侧各自独立排序下拉（均无文字标签）（`sort_mode` / `project_sort_mode`，值：优先级 / 截止日期 / 综合=优先级优先同级按截止）；「综合」的截止键：任务=`due_at`、项目=`finished_at`（项目结束时间即截止日期）；「全部」芯片恒在项目栏最前；优先级展示：卡片徽章「高/中/低」（高红/中橙/低灰）、项目芯片彩色圆点；`Priority`（低<中<高，不序列化）、`SortMode`（库 / settings.json 存英文变体名，缺省 `Combined`）与 `ThemeMode`（**System / Light / Dark，settings.json 必填键**——旧文件缺键解析失败红字提示不迁移，缺省 `System`）——`SortMode` / `ThemeMode` 派生 `Serialize/Deserialize/Default`；`.theme()` 闭包**恒返回 `Some(Theme::custom(…))`**（两套自定义调色板）：System → 按 `App.is_dark()`（`App.system_dark` 经 `iced::system::theme_changes` 订阅实时更新，不持久化）显式映射，Light / Dark → 固定板，view 层语义色取板共用同一 `is_dark` 判定（iced 原生 `None` 跟随在手动 → Auto 切换时窗口边框 / 内容主题分裂，故不用）。
 
 ## 5. 代码风格
 
 - 模块职责单一：model = 纯数据、update = 纯逻辑、view = 渲染、storage = IO；新增功能先判断归属，不跨层写代码。
 - view 层不持有业务逻辑；派生展示（状态徽章、摘要、耗时格式化、项目计数、筛选）放在 view 内部私有函数。
-- 颜色、字体等视觉常量用模块级 `const`，如 `MUTED / ACCENT / DONE`。
+- 颜色、字体等视觉常量用模块级 `const`；主题颜色为两套自定义 `Palette`（`LIGHT_PALETTE`「晴空」/ `DARK_PALETTE`「夜航」）+ 语义色双板 `SemColors`（`muted / blue / done / accent / error`），对比度由 view 测试锁定（≥ 4.5:1）。
 - 新依赖直接在 Cargo.toml 的 `[dependencies]` 中声明（仅原生目标，无 wasm 分块）。
 - 提交前运行 `cargo fmt` 与 `cargo clippy`，保持零警告。
 

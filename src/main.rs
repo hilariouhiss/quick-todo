@@ -12,9 +12,9 @@ mod view;
 use iced::futures::{SinkExt, channel::mpsc};
 use iced::{Size, Subscription, Task, Theme};
 
-use model::{App, ThemeMode};
+use model::App;
 use update::{Message, update};
-use view::view;
+use view::{DARK_PALETTE, LIGHT_PALETTE, view};
 
 pub fn main() -> iced::Result {
     iced::application(boot, update, view)
@@ -22,17 +22,15 @@ pub fn main() -> iced::Result {
         // 主题：System → 跟随系统主题显式映射（system_dark 经订阅实时更新）；
         // Light / Dark → 固定模式。**恒返回 Some**——iced 的 None 跟随（`Theme::default`）
         // 在“手动模式 → Auto”切换时用旧模式解析默认主题，且原生窗口边框先跟随系统，
-        // 造成“边框白 / 内容深”分裂；显式映射保证窗口背景与内容始终一致
+        // 造成“边框白 / 内容深”分裂；显式映射保证窗口背景与内容始终一致。
+        // 两套自定义调色板（view::LIGHT_PALETTE / DARK_PALETTE，浅「晴空」/ 深「夜航」），
+        // 经 `Theme::custom` 自动派生 `extended_palette()`，样式层零改动。
         .theme(|app: &App| -> Option<Theme> {
-            match app.theme_mode {
-                ThemeMode::System => Some(if app.system_dark {
-                    Theme::Dark
-                } else {
-                    Theme::Light
-                }),
-                ThemeMode::Light => Some(Theme::Light),
-                ThemeMode::Dark => Some(Theme::Dark),
-            }
+            Some(if app.is_dark() {
+                Theme::custom("QuickTodo Dark", DARK_PALETTE)
+            } else {
+                Theme::custom("QuickTodo Light", LIGHT_PALETTE)
+            })
         })
         .window(iced::window::Settings {
             min_size: Some(Size::new(480.0, 360.0)),

@@ -526,6 +526,18 @@ impl Default for App {
     }
 }
 
+impl App {
+    /// 当前生效的暗色模式：System 按系统实时状态、Light / Dark 固定。
+    /// 与 main.rs 的主题装配（`Theme::custom`）共用同一判定，view 层语义色据此取板。
+    pub fn is_dark(&self) -> bool {
+        match self.theme_mode {
+            ThemeMode::System => self.system_dark,
+            ThemeMode::Light => false,
+            ThemeMode::Dark => true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,6 +711,35 @@ mod tests {
         assert_eq!(ThemeMode::System.label(), "Auto");
         assert_eq!(ThemeMode::Light.label(), "Light");
         assert_eq!(ThemeMode::Dark.label(), "Dark");
+    }
+
+    #[test]
+    fn app_is_dark_follows_mode() {
+        // System：跟随系统实时状态（不持久化）
+        let app = App {
+            theme_mode: ThemeMode::System,
+            system_dark: false,
+            ..App::default()
+        };
+        assert!(!app.is_dark());
+        let app = App {
+            system_dark: true,
+            ..app
+        };
+        assert!(app.is_dark());
+        // 手动模式：固定，不受系统状态影响
+        let app = App {
+            theme_mode: ThemeMode::Light,
+            system_dark: true,
+            ..app
+        };
+        assert!(!app.is_dark());
+        let app = App {
+            theme_mode: ThemeMode::Dark,
+            system_dark: false,
+            ..app
+        };
+        assert!(app.is_dark());
     }
 
     #[test]

@@ -16,22 +16,96 @@ use iced::widget::{
     PickList, Space, button, column, container, mouse_area, opaque, pick_list, row, scrollable,
     stack, text, text_input, tooltip,
 };
-use iced::{Alignment, Background, Border, Color, Element, Font, Length};
+use iced::{Alignment, Background, Border, Color, Element, Font, Length, color};
+use std::sync::LazyLock;
 use uuid::Uuid;
 
 use crate::model::{App, Priority, Project, QuickDue, SortMode, Todo, TodoStatus};
 use crate::update::Message;
 
-/// 次要文本（标签、提示）颜色：中性灰（深浅主题均衡可读：浅底 3.7:1 / 深底 4.5:1）
-const MUTED: Color = Color::from_rgb(0.49, 0.52, 0.56);
-/// 错误提示：红
-const ERROR_COLOR: Color = Color::from_rgb(0.92, 0.45, 0.45);
-/// 进行中（橙）
-const ACCENT: Color = Color::from_rgb(0.98, 0.70, 0.25);
-/// 进行中高亮（蓝）：状态徽章 / 实时耗时——浅色主题下比橙黄更清晰可读
-const BLUE: Color = Color::from_rgb(0.15, 0.40, 0.93);
-/// 已完成（绿）
-const DONE: Color = Color::from_rgb(0.36, 0.78, 0.50);
+// ---------- 主题调色板（两套：浅色「晴空」 / 深色「夜航」）----------
+
+/// 浅色主题「晴空」：冷调近白底 + 靛蓝主色（现代生产力工具风）。
+/// 全部关键文字配对对比度 ≥ 4.5:1（tests::palette_contrast 按真实派生底色断言）。
+pub(crate) const LIGHT_PALETTE: iced::theme::Palette = iced::theme::Palette {
+    background: color!(0xF7F8FA),
+    text: color!(0x1F2328),
+    primary: color!(0x1D4ED8),
+    success: color!(0x166534),
+    warning: color!(0x92400E),
+    danger: color!(0x991B1B),
+};
+
+/// 深色主题「夜航」：Tokyo Night 蓝紫底 + 提亮主色（去饱和防眩光，分层提亮）。
+pub(crate) const DARK_PALETTE: iced::theme::Palette = iced::theme::Palette {
+    background: color!(0x1A1B26),
+    text: color!(0xD7D9E3),
+    primary: color!(0x8FB2FF),
+    success: color!(0x9ECE6A),
+    warning: color!(0xE0AF68),
+    danger: color!(0xF7768E),
+};
+
+/// 两套调色板的派生扩展色静态缓存：`extended_palette()` 的等价物，
+/// 供无 `&Theme` 参数的位置取派生文字色（如选中芯片文字 `primary.weak.text`）。
+static LIGHT_EXTENDED: LazyLock<iced::theme::palette::Extended> =
+    LazyLock::new(|| iced::theme::palette::Extended::generate(LIGHT_PALETTE));
+static DARK_EXTENDED: LazyLock<iced::theme::palette::Extended> =
+    LazyLock::new(|| iced::theme::palette::Extended::generate(DARK_PALETTE));
+
+/// 当前主题的派生扩展色（与 main.rs 的主题装配共用 `App::is_dark` 判定）。
+fn extended(app: &App) -> &'static iced::theme::palette::Extended {
+    if app.is_dark() {
+        &DARK_EXTENDED
+    } else {
+        &LIGHT_EXTENDED
+    }
+}
+
+/// 语义色（随深浅主题切换的双板）：状态徽章 / 错误 / 次要文字等固定色不能依赖
+/// `extended_palette` 派生，按主题显式定义；对比度均 ≥ 4.5:1（tests 锁定）。
+#[derive(Clone, Copy)]
+struct SemColors {
+    /// 次要文字（标签 / 提示 / 时间元信息 / 无项目）
+    muted: Color,
+    /// 进行中高亮（状态徽章 / 实时耗时）
+    blue: Color,
+    /// 已完成（徽章 / 总耗时）
+    done: Color,
+    /// 中优先级（徽章 / 圆点）
+    accent: Color,
+    /// 错误 / 逾期 / 高优先级
+    error: Color,
+}
+
+/// 浅色主题语义色。
+const LIGHT_SEM: SemColors = SemColors {
+    muted: color!(0x4B5563),
+    blue: color!(0x1D4ED8),
+    done: color!(0x166534),
+    accent: color!(0x92400E),
+    error: color!(0x991B1B),
+};
+
+/// 深色主题语义色（深色下用提亮的同族色，保证弱底可读）。
+const DARK_SEM: SemColors = SemColors {
+    muted: color!(0xA6ADB8),
+    blue: color!(0x8FB2FF),
+    done: color!(0x9ECE6A),
+    accent: color!(0xE0AF68),
+    error: color!(0xF7768E),
+};
+
+/// 按是否暗色取语义色板。
+const fn sem_colors(dark: bool) -> SemColors {
+    if dark { DARK_SEM } else { LIGHT_SEM }
+}
+
+/// 当前主题的语义色（与 main.rs 的主题装配共用 `App::is_dark` 判定）。
+fn sem(app: &App) -> SemColors {
+    sem_colors(app.is_dark())
+}
+
 /// 下拉菜单距窗口顶部的偏移：内容区 padding 24 + 标题行高（26px 字号 ≈34）
 /// + 按钮垂直居中（按钮底 ≈55）+ 9px 间隙；字体 / DPI 变化时在此校准
 const ADD_MENU_TOP: f32 = 64.0;
@@ -222,12 +296,12 @@ fn priority_picker<'a>(
     .into()
 }
 
-/// 优先级徽章 / 圆点颜色：高=红、中=橙、低=灰。
-fn priority_color(priority: Priority) -> Color {
+/// 优先级徽章 / 圆点颜色：高=红、中=橙、低=灰（取自当前主题语义色）。
+fn priority_color(sem: SemColors, priority: Priority) -> Color {
     match priority {
-        Priority::High => ERROR_COLOR,
-        Priority::Medium => ACCENT,
-        Priority::Low => MUTED,
+        Priority::High => sem.error,
+        Priority::Medium => sem.accent,
+        Priority::Low => sem.muted,
     }
 }
 
@@ -235,10 +309,11 @@ fn priority_color(priority: Priority) -> Color {
 /// 深浅主题均取 `extended_palette()` 自适应。
 fn pick_list_style(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
     let background = theme.extended_palette().background;
+    let muted = sem_colors(theme.extended_palette().is_dark).muted;
     let base = pick_list::Style {
         text_color: background.base.text,
         placeholder_color: background.base.text,
-        handle_color: MUTED,
+        handle_color: muted,
         background: background.weak.color.into(),
         border: Border {
             color: background.strong.color,
@@ -293,10 +368,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let mut body = column![header].spacing(SPACE_L).height(Length::Fill);
 
-    // 加载 / 保存错误：红底横幅
+    // 加载 / 保存错误：弱底红字横幅（底 = background.weak，文字 = danger 色，可读性 ≥ 4.5:1）
     if let Some(error) = &app.error {
+        let s = sem(app);
         body = body.push(
-            container(text(error.as_str()).size(FONT_SMALL).color(ERROR_COLOR))
+            container(text(error.as_str()).size(FONT_SMALL).color(s.error))
                 .width(Length::Fill)
                 .padding([SPACE_S, SPACE_M])
                 .style(error_banner_style),
@@ -428,6 +504,7 @@ fn scrim_style(_theme: &iced::Theme) -> container::Style {
 /// 弹窗卡片：标题 / 描述 / 所属项目 / 截止时间（输入 + 快捷下拉）+ 操作按钮。
 fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     let dialog = app.add_dialog.as_ref().expect("弹窗卡片仅在弹窗打开时渲染");
+    let s = sem(app);
 
     // 标题（必填）：回车提交
     let title_input = text_input("任务标题（必填）", &dialog.title)
@@ -450,7 +527,7 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     let project_picker = row![
         text("所属项目")
             .size(FONT_BODY)
-            .color(MUTED)
+            .color(s.muted)
             .width(Length::Fixed(LABEL_WIDTH)),
         PickList::new(
             project_choices(app),
@@ -471,7 +548,7 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     let priority_row = row![
         text("优先级")
             .size(FONT_BODY)
-            .color(MUTED)
+            .color(s.muted)
             .width(Length::Fixed(LABEL_WIDTH)),
         priority_picker(dialog.priority, Message::DialogPriorityChanged),
     ]
@@ -482,7 +559,7 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     let due_row = row![
         text("截止时间")
             .size(FONT_BODY)
-            .color(MUTED)
+            .color(s.muted)
             .width(Length::Fixed(LABEL_WIDTH)),
         text_input("2026-01-31 或 2026-01-31 18:30", &dialog.due_input)
             .on_input(Message::DialogDueChanged)
@@ -507,8 +584,8 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     let mut form = column![
         text("添加任务").size(FONT_DIALOG_TITLE).font(BOLD),
         Space::new().height(SPACE_XS),
-        form_field("标题", title_input),
-        form_field("描述", description_input),
+        form_field(app, "标题", title_input),
+        form_field(app, "描述", description_input),
         project_picker,
         priority_row,
         due_row,
@@ -516,7 +593,7 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     .spacing(SPACE_L);
 
     if let Err(hint) = &dialog.due_parsed {
-        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(ERROR_COLOR));
+        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
 
     // 按钮行：标题为空或截止时间非法时"创建"禁用
@@ -552,6 +629,7 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         .project_dialog
         .as_ref()
         .expect("项目弹窗仅在弹窗打开时渲染");
+    let s = sem(app);
 
     // 名称（必填）：回车提交
     let name_input = text_input("项目名称（必填）", &dialog.name)
@@ -582,10 +660,11 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     let mut form = column![
         text("添加项目").size(FONT_DIALOG_TITLE).font(BOLD),
         Space::new().height(SPACE_XS),
-        form_field("名称", name_input),
-        form_field("开始时间", start_input),
-        form_field("结束时间", end_input),
+        form_field(app, "名称", name_input),
+        form_field(app, "开始时间", start_input),
+        form_field(app, "结束时间", end_input),
         form_field(
+            app,
             "优先级",
             priority_picker(dialog.priority, Message::ProjectDialogPriorityChanged),
         ),
@@ -593,19 +672,19 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     .spacing(SPACE_L);
 
     if let Err(hint) = &dialog.start_parsed {
-        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(ERROR_COLOR));
+        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
     if let Err(hint) = &dialog.end_parsed {
-        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(ERROR_COLOR));
+        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
     if name_conflict {
-        form = form.push(text("项目名已存在").size(FONT_SMALL).color(ERROR_COLOR));
+        form = form.push(text("项目名已存在").size(FONT_SMALL).color(s.error));
     }
     if range_invalid {
         form = form.push(
             text("开始时间必须早于结束时间")
                 .size(FONT_SMALL)
-                .color(ERROR_COLOR),
+                .color(s.error),
         );
     }
 
@@ -651,7 +730,10 @@ fn completed_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     done.sort_by_key(|todo| std::cmp::Reverse(todo.finished_at));
 
     let list: Element<'_, Message> = if done.is_empty() {
-        text("暂无已完成任务").size(FONT_BODY).color(MUTED).into()
+        text("暂无已完成任务")
+            .size(FONT_BODY)
+            .color(sem(app).muted)
+            .into()
     } else {
         column(done.into_iter().map(|todo| done_row(todo, app)))
             .spacing(SPACE_S)
@@ -702,7 +784,7 @@ fn done_row<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
             text(todo.title.as_str()).size(FONT_HEADER).font(BOLD),
             text(format!("{project} · 完成于 {finished} · 总耗时 {total}"))
                 .size(FONT_TINY)
-                .color(MUTED),
+                .color(sem(app).muted),
         ]
         .spacing(SPACE_XXS)
         .width(Length::Fill),
@@ -717,15 +799,22 @@ fn done_row<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
 }
 
 /// 弹窗表单里带小标签的一行（标签在上、输入框在下）。
-fn form_field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![text(label).size(FONT_BODY).color(MUTED), input.into()]
-        .spacing(SPACE_XS)
-        .into()
+fn form_field<'a>(
+    app: &'a App,
+    label: &'a str,
+    input: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    column![
+        text(label).size(FONT_BODY).color(sem(app).muted),
+        input.into()
+    ]
+    .spacing(SPACE_XS)
+    .into()
 }
 
 /// 空列表提示（整区空 / 组内空均垂直居中）。
-fn empty_hint(message: &'static str) -> Element<'static, Message> {
-    container(text(message).size(FONT_HEADER).color(MUTED))
+fn empty_hint<'a>(app: &'a App, message: &'static str) -> Element<'a, Message> {
+    container(text(message).size(FONT_HEADER).color(sem(app).muted))
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(SPACE_M * 4.0)
@@ -758,7 +847,7 @@ fn project_bar(app: &App) -> Element<'_, Message> {
 
     if app.projects.is_empty() {
         chips = chips.push(
-            container(text("暂无项目").size(FONT_SMALL).color(MUTED))
+            container(text("暂无项目").size(FONT_SMALL).color(sem(app).muted))
                 .padding([6, 2])
                 .align_y(Alignment::Center),
         );
@@ -836,15 +925,25 @@ fn project_chip<'a>(
     count: usize,
 ) -> Element<'a, Message> {
     let selected = app.selected_project == id;
+    let s = sem(app);
 
     let mut content = row![].align_y(Alignment::Center).spacing(SPACE_S);
     // 优先级圆点：仅项目芯片（「全部」无归属项目）且设置了优先级时显示
     if let Some(priority) = project.and_then(|p| p.priority) {
-        content = content.push(text("●").size(FONT_MICRO).color(priority_color(priority)));
+        content = content.push(
+            text("●")
+                .size(FONT_MICRO)
+                .color(priority_color(s, priority)),
+        );
     }
-    content = content
-        .push(text(name).size(FONT_BODY))
-        .push(text(count.to_string()).size(FONT_SMALL).color(MUTED));
+    content = content.push(text(name).size(FONT_BODY)).push(
+        text(count.to_string()).size(FONT_SMALL).color(if selected {
+            // 选中态：芯片文字用 primary.weak 的可读配对色（与名称同色系，弱化字号区分）
+            extended(app).primary.weak.text
+        } else {
+            s.muted
+        }),
+    );
 
     let chip = button(content)
         .on_press(Message::SelectProject(id))
@@ -876,7 +975,13 @@ fn project_chip_style(
         } else {
             palette.background.weak.color
         })),
-        text_color: palette.background.base.text,
+        // 选中态文字用 primary.weak 的可读配对色（iced readable 保证），未选中用主文字色——
+        // 深色下 primary.weak 为中调蓝底，主文字叠其上仅 ~2.3:1，必须随选中态切换
+        text_color: if selected {
+            palette.primary.weak.text
+        } else {
+            palette.background.base.text
+        },
         border: Border {
             color: if selected {
                 palette.primary.base.color
@@ -911,6 +1016,7 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
         .project_edit
         .as_ref()
         .expect("编辑面板仅在 project_edit 命中时渲染");
+    let s = sem(app);
 
     // 派生校验（视图实时反馈，update 层保存时再防御一次）
     let name = edit.name.trim();
@@ -927,7 +1033,7 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
     let mut form = column![
         row![
             column![
-                text("名称").size(FONT_TINY).color(MUTED),
+                text("名称").size(FONT_TINY).color(sem(app).muted),
                 text_input("项目名称", &edit.name)
                     .id(PROJECT_EDIT_NAME_ID)
                     .on_input(Message::ProjectEditNameChanged)
@@ -938,7 +1044,7 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
             .width(Length::Fill),
             Space::new().width(SPACE_L),
             column![
-                text("优先级").size(FONT_TINY).color(MUTED),
+                text("优先级").size(FONT_TINY).color(sem(app).muted),
                 priority_picker(edit.priority, Message::ProjectEditPriorityChanged),
             ]
             .spacing(SPACE_XXS)
@@ -947,12 +1053,14 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
         .align_y(Alignment::End),
         row![
             labeled_input(
+                app,
                 "开始时间",
                 "2026-01-31",
                 &edit.start_input,
                 Message::ProjectEditStartChanged,
             ),
             labeled_input(
+                app,
                 "结束时间",
                 "2026-01-31",
                 &edit.end_input,
@@ -964,16 +1072,16 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
     .spacing(SPACE_M);
 
     if let Err(hint) = &edit.start_parsed {
-        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(ERROR_COLOR));
+        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
     if let Err(hint) = &edit.end_parsed {
-        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(ERROR_COLOR));
+        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
     if name_conflict {
-        form = form.push(text("项目名已存在").size(FONT_SMALL).color(ERROR_COLOR));
+        form = form.push(text("项目名已存在").size(FONT_SMALL).color(s.error));
     }
     if range_invalid {
-        form = form.push(text("开始须早于结束").size(FONT_SMALL).color(ERROR_COLOR));
+        form = form.push(text("开始须早于结束").size(FONT_SMALL).color(s.error));
     }
 
     let can_submit = !name.is_empty()
@@ -1066,9 +1174,9 @@ fn stats_group(app: &App) -> Element<'_, Message> {
     container(
         row![
             text(format!("共 {total} 项")).size(FONT_BODY),
-            text(" | ").size(FONT_BODY).color(MUTED),
+            text(" | ").size(FONT_BODY).color(sem(app).muted),
             text(format!("进行中 {in_progress}")).size(FONT_BODY),
-            text(" | ").size(FONT_BODY).color(MUTED),
+            text(" | ").size(FONT_BODY).color(sem(app).muted),
             button(text(format!("已完成 {done}")).size(FONT_BODY).font(BOLD))
                 .on_press(Message::OpenCompletedDialog)
                 .style(link_button_style),
@@ -1112,13 +1220,13 @@ fn summary_pill_style(theme: &iced::Theme) -> container::Style {
     }
 }
 
-/// 错误横幅样式：危险弱色底 + 卡片圆角。
+/// 错误横幅样式：弱色底 + 危险色描边 + 卡片圆角（文字用 danger 色，弱底上可读性 ≥ 4.5:1）。
 fn error_banner_style(theme: &iced::Theme) -> container::Style {
-    let danger = theme.extended_palette().danger;
+    let palette = theme.extended_palette();
     container::Style {
-        background: Some(Background::Color(danger.weak.color)),
+        background: Some(Background::Color(palette.background.weak.color)),
         border: Border {
-            color: danger.strong.color,
+            color: palette.danger.strong.color,
             width: 1.0,
             radius: RADIUS_CARD.into(),
         },
@@ -1128,13 +1236,14 @@ fn error_banner_style(theme: &iced::Theme) -> container::Style {
 
 /// 带小标签的窄输入框（项目编辑面板用），回车即保存。
 fn labeled_input<'a>(
+    app: &'a App,
     label: &'a str,
     placeholder: &'a str,
     value: &'a str,
     on_input: fn(String) -> Message,
 ) -> Element<'a, Message> {
     column![
-        text(label).size(FONT_TINY).color(MUTED),
+        text(label).size(FONT_TINY).color(sem(app).muted),
         text_input(placeholder, value)
             .on_input(on_input)
             .on_submit(Message::SaveEditProject)
@@ -1170,11 +1279,14 @@ fn short_date(dt: DateTime<Utc>) -> String {
 /// 综合，未设置均排最后）；已完成任务不在此显示（见归档弹窗）。
 fn grouped_columns<'a>(app: &'a App, todos: Vec<&'a Todo>) -> Element<'a, Message> {
     if todos.is_empty() {
-        return empty_hint(if app.selected_project.is_some() {
-            "该项目暂无任务"
-        } else {
-            "暂无任务，先添加一个吧"
-        });
+        return empty_hint(
+            app,
+            if app.selected_project.is_some() {
+                "该项目暂无任务"
+            } else {
+                "暂无任务，先添加一个吧"
+            },
+        );
     }
 
     let mut pending: Vec<&Todo> = todos
@@ -1238,7 +1350,7 @@ fn group_scroll<'a>(
     app: &'a App,
 ) -> Element<'a, Message> {
     let list: Element<'_, Message> = if todos.is_empty() {
-        empty_hint(empty)
+        empty_hint(app, empty)
     } else {
         column(todos.into_iter().map(|todo| todo_card(todo, app)))
             .spacing(SPACE_M)
@@ -1255,6 +1367,7 @@ fn group_scroll<'a>(
 /// 单个任务的卡片：标题 + 可选描述 + 状态徽章 + 操作按钮 + 时间元信息。
 /// 默认全部属性只读展示；该卡片处于编辑模式时（"当前任务"）渲染可编辑表单。
 fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
+    let s = sem(app);
     if app
         .todo_edit
         .as_ref()
@@ -1274,14 +1387,14 @@ fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         head = head.push(
             text(priority.label())
                 .size(FONT_TINY)
-                .color(priority_color(priority)),
+                .color(priority_color(s, priority)),
         );
     }
     head = head
         .push(
             text(todo.status().label())
                 .size(FONT_SMALL)
-                .color(status_color(todo.status())),
+                .color(status_color(s, todo.status())),
         )
         .push(actions(todo));
 
@@ -1291,7 +1404,7 @@ fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         content = content.push(
             text(todo.description.as_str())
                 .size(FONT_BODY)
-                .color(MUTED)
+                .color(s.muted)
                 .width(Length::Fill),
         );
     }
@@ -1315,12 +1428,12 @@ fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         .into()
 }
 
-/// 状态徽章颜色：未开始＝灰、进行中＝蓝、已完成＝绿。
-fn status_color(status: TodoStatus) -> Color {
+/// 状态徽章颜色：未开始＝灰、进行中＝蓝、已完成＝绿（取自当前主题语义色）。
+fn status_color(sem: SemColors, status: TodoStatus) -> Color {
     match status {
-        TodoStatus::Pending => MUTED,
-        TodoStatus::InProgress => BLUE,
-        TodoStatus::Done => DONE,
+        TodoStatus::Pending => sem.muted,
+        TodoStatus::InProgress => sem.blue,
+        TodoStatus::Done => sem.done,
     }
 }
 
@@ -1401,6 +1514,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         .todo_edit
         .as_ref()
         .expect("编辑模式仅在 todo_edit 命中该卡片时渲染");
+    let s = sem(app);
 
     // 标题（必填）：回车保存
     let title_input = text_input("任务标题（必填）", &edit.title)
@@ -1419,7 +1533,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     let project_picker = row![
         text("项目")
             .size(FONT_BODY)
-            .color(MUTED)
+            .color(s.muted)
             .width(Length::Fixed(LABEL_WIDTH)),
         PickList::new(
             project_choices(app),
@@ -1439,7 +1553,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     let priority_row = row![
         text("优先级")
             .size(FONT_BODY)
-            .color(MUTED)
+            .color(s.muted)
             .width(Length::Fixed(LABEL_WIDTH)),
         priority_picker(edit.priority, Message::EditPriorityChanged),
     ]
@@ -1450,7 +1564,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     let due_row = row![
         text("截止时间")
             .size(FONT_BODY)
-            .color(MUTED)
+            .color(s.muted)
             .width(Length::Fixed(LABEL_WIDTH)),
         text_input("2026-01-31 或 2026-01-31 18:30", &edit.due_input)
             .on_input(Message::EditDueChanged)
@@ -1477,7 +1591,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         Space::new().width(SPACE_M),
         text(todo.status().label())
             .size(FONT_SMALL)
-            .color(status_color(todo.status())),
+            .color(status_color(s, todo.status())),
     ]
     .align_y(Alignment::Center)
     .spacing(SPACE_M);
@@ -1492,7 +1606,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     ]
     .spacing(SPACE_M);
     if let Err(hint) = &edit.due_parsed {
-        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(ERROR_COLOR));
+        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
 
     // 底部操作行：保存 / 取消（与只读卡片的「编辑」按钮位置对称）
@@ -1547,10 +1661,10 @@ fn project_row_readonly<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message
         .project_id
         .and_then(|id| app.projects.iter().find(|p| p.id == id))
     {
-        Some(project) => (project.name.as_str(), MUTED),
-        None => ("无项目", MUTED),
+        Some(project) => (project.name.as_str(), sem(app).muted),
+        None => ("无项目", sem(app).muted),
     };
-    time_row("项目", name.into(), color)
+    time_row(app, "项目", name.into(), color)
 }
 
 /// pick_list 的选项包装：`id = None` 表示"无项目"（解除归属）。
@@ -1602,33 +1716,46 @@ impl std::fmt::Display for QuickDue {
 /// （不含项目行：普通模式由 `project_row_readonly` 展示，编辑模式用下拉。）
 fn time_meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     let mut meta = column![].spacing(SPACE_XS);
+    let s = sem(app);
 
     // 截止时间：已逾期且未完成的任务标红提示
     if let Some(due) = todo.due_at {
         let overdue = todo.status() != TodoStatus::Done && due < app.now;
         meta = meta.push(time_row(
+            app,
             "截止时间",
             format_time(due),
-            if overdue { ERROR_COLOR } else { MUTED },
+            if overdue { s.error } else { s.muted },
         ));
     }
 
-    meta = meta.push(time_row("创建时间", format_time(todo.created_at), MUTED));
+    meta = meta.push(time_row(
+        app,
+        "创建时间",
+        format_time(todo.created_at),
+        s.muted,
+    ));
 
     if todo.status() == TodoStatus::InProgress {
         let elapsed = todo
             .duration(app.now)
             .map(format_duration)
             .unwrap_or_else(|| "—".into());
-        meta = meta.push(time_row("已耗时", format!("{elapsed}（实时）"), BLUE));
+        meta = meta.push(time_row(
+            app,
+            "已耗时",
+            format!("{elapsed}（实时）"),
+            s.blue,
+        ));
     }
 
     meta = meta.push(time_row(
+        app,
         "结束时间",
         todo.finished_at
             .map(format_time)
             .unwrap_or_else(|| "—".into()),
-        MUTED,
+        s.muted,
     ));
 
     if todo.status() == TodoStatus::Done {
@@ -1636,7 +1763,7 @@ fn time_meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
             .duration(app.now)
             .map(format_duration)
             .unwrap_or_else(|| "—".into());
-        meta = meta.push(time_row("总耗时", total, DONE));
+        meta = meta.push(time_row(app, "总耗时", total, s.done));
     }
 
     meta.into()
@@ -1650,11 +1777,11 @@ fn meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
 }
 
 /// 带固定宽度标签的一行时间信息。
-fn time_row(label: &str, value: String, color: Color) -> Element<'_, Message> {
+fn time_row<'a>(app: &'a App, label: &'a str, value: String, color: Color) -> Element<'a, Message> {
     row![
         text(label)
             .size(FONT_BODY)
-            .color(MUTED)
+            .color(sem(app).muted)
             .width(Length::Fixed(LABEL_WIDTH)),
         text(value).size(FONT_BODY).color(color),
     ]
@@ -1677,5 +1804,128 @@ fn format_duration(d: Duration) -> String {
         (0, 0) => format!("{seconds} 秒"),
         (0, _) => format!("{minutes} 分 {seconds} 秒"),
         _ => format!("{hours} 小时 {minutes} 分 {seconds} 秒"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::theme::palette::Extended;
+
+    /// WCAG 2.x 相对亮度（sRGB → 线性 → 加权和）。
+    fn relative_luminance(color: Color) -> f32 {
+        let linear = |c: f32| {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+    }
+
+    /// WCAG 2.x 对比度（1.0 ~ 21.0）。
+    fn contrast_ratio(a: Color, b: Color) -> f32 {
+        let (l1, l2) = (relative_luminance(a), relative_luminance(b));
+        let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// 两套调色板的关键文字配对对比度（含 iced 真实派生底色，`Extended::generate`）：
+    /// 正文 ≥ 7.0；六色 / 语义色 vs 主背景与弱底 ≥ 4.5（WCAG AA）；下拉 handle（强底）按 UI 元素 ≥ 3.0。
+    #[test]
+    fn palette_and_sem_colors_contrast() {
+        for (name, palette, sem) in [
+            ("浅色", LIGHT_PALETTE, LIGHT_SEM),
+            ("深色", DARK_PALETTE, DARK_SEM),
+        ] {
+            // 正文对比（AA 之上，正文 7:1 更舒适）
+            assert!(
+                contrast_ratio(palette.text, palette.background) >= 7.0,
+                "{name} 正文对比度不足: {}",
+                contrast_ratio(palette.text, palette.background)
+            );
+            // Palette 六色 vs 主背景
+            for (label, color) in [
+                ("primary", palette.primary),
+                ("success", palette.success),
+                ("warning", palette.warning),
+                ("danger", palette.danger),
+            ] {
+                assert!(
+                    contrast_ratio(color, palette.background) >= 4.5,
+                    "{name} {label} 在主背景上对比度不足: {}",
+                    contrast_ratio(color, palette.background)
+                );
+            }
+            // 真实派生底色（iced `Extended::generate`，非估算）
+            let ext = Extended::generate(palette);
+            let weak = ext.background.weak.color;
+            let strong = ext.background.strong.color;
+            // 语义色 vs 主背景与卡片弱底
+            for (label, color) in [
+                ("muted", sem.muted),
+                ("blue", sem.blue),
+                ("done", sem.done),
+                ("accent", sem.accent),
+                ("error", sem.error),
+            ] {
+                assert!(
+                    contrast_ratio(color, palette.background) >= 4.5,
+                    "{name} {label} 在主背景上对比度不足: {}",
+                    contrast_ratio(color, palette.background)
+                );
+                assert!(
+                    contrast_ratio(color, weak) >= 4.5,
+                    "{name} {label} 在弱底上对比度不足: {}",
+                    contrast_ratio(color, weak)
+                );
+            }
+            // 选中芯片文字：primary.weak 底上的派生可读配对色（iced readable 兜底）
+            assert!(
+                contrast_ratio(ext.primary.weak.text, ext.primary.weak.color) >= 4.5,
+                "{name} 选中芯片文字对比度不足: {}",
+                contrast_ratio(ext.primary.weak.text, ext.primary.weak.color)
+            );
+            // 未选中芯片文字：主文字叠弱底（project_chip_style 未选中态实际渲染配对）
+            assert!(
+                contrast_ratio(ext.background.base.text, weak) >= 4.5,
+                "{name} 未选中芯片文字对比度不足: {}",
+                contrast_ratio(ext.background.base.text, weak)
+            );
+            // 统计胶囊链接文字（primary 色，弱底）
+            assert!(
+                contrast_ratio(palette.primary, weak) >= 4.5,
+                "{name} 链接文字对比度不足: {}",
+                contrast_ratio(palette.primary, weak)
+            );
+            // 错误横幅文字（danger 色，弱底）
+            assert!(
+                contrast_ratio(palette.danger, weak) >= 4.5,
+                "{name} 错误横幅文字对比度不足: {}",
+                contrast_ratio(palette.danger, weak)
+            );
+            // 下拉 handle（muted，强底）：UI 元素按 3:1
+            assert!(
+                contrast_ratio(sem.muted, strong) >= 3.0,
+                "{name} 下拉 handle 对比度不足: {}",
+                contrast_ratio(sem.muted, strong)
+            );
+        }
+    }
+
+    /// 两套调色板的明暗语义与语义色取板正确。
+    #[test]
+    fn palette_dark_semantics() {
+        assert!(
+            !Extended::generate(LIGHT_PALETTE).is_dark,
+            "浅色板被判定为暗色"
+        );
+        assert!(
+            Extended::generate(DARK_PALETTE).is_dark,
+            "深色板被判定为亮色"
+        );
+        assert_eq!(sem_colors(false).muted, LIGHT_SEM.muted);
+        assert_eq!(sem_colors(true).muted, DARK_SEM.muted);
     }
 }

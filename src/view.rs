@@ -814,6 +814,10 @@ impl canvas::Program<Message> for StatsChart {
 
 impl StatsChart {
     /// 纵柱状图：Y 轴刻度 + 水平网格线 + 柱（末桶 = 当前周期高亮）+ 柱顶外侧数值 + X 轴周期标签。
+    ///
+    /// 全部坐标用**画布本地坐标系**（原点 = canvas 左上角）：canvas widget 绘制时
+    /// renderer 已按 `bounds.x/y` 平移到画布位置，frame 内若再叠加 `bounds.x/y`
+    /// 会把整图偏移出画布——历史 bug「弹窗内图表区空白」的根因。
     fn draw_vertical(&self, frame: &mut canvas::Frame, theme: &iced::Theme, bounds: Rectangle) {
         let palette = theme.extended_palette();
         let text_color = sem_colors(self.dark).muted;
@@ -832,16 +836,8 @@ impl StatsChart {
             .fold(0.0f64, f64::max)
             .max(1.0); // 全 0 时退化为 1，避免除零
 
-        // 布局：左 Y 轴标签区 / 顶部数值留白 / 底部 X 轴标签区
-        let axis_w = 44.0;
-        let x_label_h = 16.0;
-        let top = 14.0;
-        let plot = Rectangle {
-            x: bounds.x + axis_w,
-            y: bounds.y + top,
-            width: bounds.width - axis_w,
-            height: bounds.height - top - x_label_h,
-        };
+        // 布局：左 Y 轴标签区 / 顶部数值留白 / 底部 X 轴标签区（画布本地坐标）
+        let plot = vertical_plot(bounds);
 
         // 网格线 + Y 轴刻度（4 等分）
         for i in 0..=4 {
@@ -900,6 +896,7 @@ impl StatsChart {
     }
 
     /// 横条形图：每项目一行——行标签（截断）+ 横条（宽 = 值 / 最大值）+ 行尾数值。
+    /// 坐标同纵柱状图：画布本地坐标系（原点 = canvas 左上角）。
     fn draw_horizontal(&self, frame: &mut canvas::Frame, theme: &iced::Theme, bounds: Rectangle) {
         let palette = theme.extended_palette();
         let text_color = sem_colors(self.dark).muted;
@@ -921,11 +918,11 @@ impl StatsChart {
         let row_h = bounds.height / n as f32;
         let bar_area_w = bounds.width - label_w;
         for (i, b) in self.buckets.iter().enumerate() {
-            let y = bounds.y + row_h * i as f32;
+            let y = row_h * i as f32;
             // 行标签（截断）
             frame.fill_text(CanvasText {
                 content: truncate(&b.label, 6),
-                position: Point::new(bounds.x, y + row_h / 2.0),
+                position: Point::new(0.0, y + row_h / 2.0),
                 color: text_color,
                 size: FONT_TINY.into(),
                 align_y: AlignVertical::Center,
@@ -935,20 +932,40 @@ impl StatsChart {
             let v = (self.value)(b);
             let bar_w = bar_area_w * (v / max) as f32;
             frame.fill_rectangle(
-                Point::new(bounds.x + label_w, y + pad),
+                Point::new(label_w, y + pad),
                 Size::new(bar_w, (row_h - 2.0 * pad).max(2.0)),
                 bar_color,
             );
             // 行尾数值
             frame.fill_text(CanvasText {
                 content: chart_value_label(v, self.is_duration),
-                position: Point::new(bounds.x + label_w + bar_w + SPACE_XS, y + row_h / 2.0),
+                position: Point::new(label_w + bar_w + SPACE_XS, y + row_h / 2.0),
                 color: text_color,
                 size: FONT_TINY.into(),
                 align_y: AlignVertical::Center,
                 ..CanvasText::default()
             });
         }
+    }
+}
+
+/// 纵柱状图布局常量：Y 轴标签区宽。
+const AXIS_W: f32 = 44.0;
+/// 纵柱状图布局常量：X 轴标签区高。
+const X_LABEL_H: f32 = 16.0;
+/// 纵柱状图布局常量：柱顶数值留白。
+const CHART_TOP_PAD: f32 = 14.0;
+
+/// 纵柱状图绘图区（**画布本地坐标**，原点 = canvas 左上角）：扣除左轴区 / 顶部留白 / 底部标签区。
+///
+/// 不可使用 `bounds.x/y`（绝对布局坐标）——canvas 绘制时 renderer 已按该偏移平移，
+/// 叠加使用会把整图画出画布（历史 bug「弹窗内图表区空白」的根因，勿回归）。
+fn vertical_plot(bounds: Rectangle) -> Rectangle {
+    Rectangle {
+        x: AXIS_W,
+        y: CHART_TOP_PAD,
+        width: bounds.width - AXIS_W,
+        height: bounds.height - CHART_TOP_PAD - X_LABEL_H,
     }
 }
 
@@ -2164,6 +2181,31 @@ mod tests {
         app.show_stats = true;
         app.stats_dimension = StatsDimension::Project;
         renders(&app);
+    }
+
+    /// 回归：纵柱状图绘图区必须位于画布本地坐标内（历史 bug——误用 `bounds.x/y`
+    /// 绝对布局坐标，弹窗内图表整体偏移出画布、显示空白；此测试锁定不回归）。
+    #[test]
+    fn vertical_plot_stays_inside_canvas_bounds() {
+        // 模拟弹窗内的真实布局坐标：画布位于窗口中部（x/y 均非 0）
+        let bounds = Rectangle {
+            x: 160.0,
+            y: 118.0,
+            width: 520.0,
+            height: 150.0,
+        };
+        let plot = vertical_plot(bounds);
+        // 本地坐标：原点在画布内、尺寸不超出画布
+        assert!(plot.x >= 0.0 && plot.y >= 0.0);
+        assert!(plot.x + plot.width <= bounds.width);
+        assert!(plot.y + plot.height <= bounds.height);
+        // 且不依赖 bounds 位置（偏移变化不影响绘图区）
+        let moved = Rectangle {
+            x: 320.0,
+            y: 300.0,
+            ..bounds
+        };
+        assert_eq!(vertical_plot(moved), plot);
     }
 
     #[test]

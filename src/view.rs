@@ -22,7 +22,7 @@ use iced::widget::{
 use iced::{Alignment, Background, Border, Color, Element, Font, Length};
 use uuid::Uuid;
 
-use crate::model::{App, Priority, Project, QuickDue, SortMode, ThemeMode, Todo, TodoStatus};
+use crate::model::{App, Priority, Project, QuickDue, SortMode, Todo, TodoStatus};
 use crate::update::Message;
 use crate::validate;
 use theme::{SemColors, extended, sem, sem_colors};
@@ -1627,7 +1627,7 @@ fn format_duration(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AddDialog, ParsedField, ProjectDialog, ProjectEdit, TodoEdit};
+    use crate::model::{AddDialog, ParsedField, ProjectDialog, ProjectEdit, ThemeMode, TodoEdit};
     use chrono::TimeZone;
 
     fn dt(secs: i64) -> DateTime<Utc> {
@@ -1706,6 +1706,8 @@ mod tests {
         renders(&app);
     }
 
+    /// 测试场景常需"先默认后逐字段赋值"构造表单状态，比结构体字面量更贴近真实交互路径。
+    #[allow(clippy::field_reassign_with_default)]
     #[test]
     fn view_renders_task_dialog() {
         let mut app = sample_app();
@@ -1721,6 +1723,7 @@ mod tests {
         renders(&app);
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     #[test]
     fn view_renders_task_dialog_with_due_error() {
         // 截止时间非法：红字提示路径
@@ -1732,6 +1735,7 @@ mod tests {
         renders(&app);
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     #[test]
     fn view_renders_project_dialog() {
         let mut app = sample_app();
@@ -1798,6 +1802,7 @@ mod tests {
         renders(&app);
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     #[test]
     fn view_renders_stacked_quick_project_dialog() {
         // 任务弹窗内「＋ 新建」：项目弹窗叠加于任务弹窗之上（顶层优先渲染）

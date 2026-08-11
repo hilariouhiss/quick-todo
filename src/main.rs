@@ -5,6 +5,7 @@
 //! subscription 提供每秒时钟以刷新"进行中"任务的实时耗时。
 
 mod model;
+mod stats;
 mod storage;
 mod update;
 mod validate;
@@ -86,6 +87,7 @@ fn subscription(app: &App) -> Subscription<Message> {
     if app.add_dialog.is_some()
         || app.project_dialog.is_some()
         || app.show_completed
+        || app.show_stats
         || app.add_menu_open
     {
         let esc = iced::event::listen_with(|event, _status, _window| {

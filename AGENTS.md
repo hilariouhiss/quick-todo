@@ -16,7 +16,7 @@ description: Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构�
 - 任务卡片默认**只读**展示全部属性；点击「编辑」进入编辑模式（即"当前任务"），可修改标题 / 描述 / 项目 / 截止时间
 - 项目以**单行横向滚动芯片**展示在任务列表上方（圆点 + 名称 + 计数，点击筛选，「全部」恒最前，选中主色高亮）；选中后右端出现「编辑 / 删除」，编辑经项目栏下方展开的**全宽编辑面板**（纯 UI 状态，不持久化）
 - 项目通过标题栏**分体按钮**「＋ 添加任务 ▾」下拉菜单中的「＋ 添加项目」**弹窗**创建（名称必填），可带可选**起止时间**（芯片悬停 tooltip 展示，编辑面板可改）；**任务弹窗内可快速新建项目**（复用新建项目弹窗，创建后自动选中）
-- 任务区**双列分组**：左=未开始、右=进行中（组内按截止时间排序）；已完成经底部 footer 统计「已完成 x」链接弹窗归档；任务添加统一走「＋ 添加任务」弹窗
+- 任务区**双列分组**：左=未开始、右=进行中（组内按截止时间排序）；已完成经底部 footer 统计「已完成 x」链接弹窗归档；footer 另有「统计」链接打开**完成统计面板**（周/月/年/项目维度 × 完成数量/总耗时图表 + 汇总数字行，Canvas 手绘）；任务添加统一走「＋ 添加任务」弹窗
 - 任务 / 项目可带可选**优先级**（无/低/中/高）；任务与项目列表可切换排序（优先级 / 截止日期 / 综合），偏好**持久化**到数据文件
 - 进行中任务显示**每秒实时**刷新耗时
 - 任务 / 项目存 SQLite（quick-todo.db），排序偏好与主题模式存 settings.json（原子写），重启不丢失
@@ -50,9 +50,10 @@ cargo fmt          # 代码格式化
 src/
 ├── main.rs     入口：iced::application 装配（boot / update / view / subscription）
 ├── model.rs    数据模型：Todo、Project、TodoStatus、App 及表单状态（ParsedField 值对象；纯数据，无 IO）
+├── stats.rs    统计计算：周/月/年/项目桶 + 汇总（纯函数，无 IO）
 ├── validate.rs 表单校验单一来源（TodoFormIssues / ProjectFormIssues 纯函数，view 与 update 共用）
 ├── update.rs   Message 枚举 + update 纯函数（状态流转、校验调用、副作用派发）
-├── view.rs     视图：标题栏（分体按钮 + 下拉菜单）+ 项目单行栏（横向滚动芯片）+ 编辑面板 + 任务区（任务卡片/编辑模式、时间元信息）+ 弹窗（任务/项目添加）+ 底部 footer（主题指示器 + 统计文本横条）+ 表单行共享组件（project_picker_row / priority_row / due_row）
+├── view.rs     视图：标题栏（分体按钮 + 下拉菜单）+ 项目单行栏（横向滚动芯片）+ 编辑面板 + 任务区（任务卡片/编辑模式、时间元信息）+ 弹窗（任务/项目/归档/统计）+ 统计图表 canvas + 底部 footer（主题指示器 + 统计文本横条）+ 表单行共享组件（project_picker_row / priority_row / due_row）
 ├── view/
 │   ├── theme.rs   主题调色板（浅「晴空」/ 深「夜航」）+ 语义色双板 SemColors + 取板函数 + 对比度测试
 │   └── tokens.rs  设计令牌（字号/间距/圆角/按钮规格/容器宽度）+ 聚焦 widget Id
@@ -75,7 +76,7 @@ docs/
 5. **数据不兼容旧版本**（开发阶段破坏性更新）：任务 / 项目存 SQLite 单文件（`quick-todo.db`，可执行文件同目录），schema 变更即破坏性更新——旧库不兼容直接报错，不做自动迁移；排序偏好与主题模式存独立 `settings.json`（缺**文件**取默认「综合」/「跟随系统」；`theme_mode` 为**必填键**——旧文件缺键解析失败红字提示，不迁移）。两个文件缺失视为空数据。
 6. **项目语义**：项目名 trim 后非空且不重名；项目添加走弹窗（标题栏分体按钮「▾」下拉菜单中的「＋ 添加项目」`OpenProjectDialog` / `SubmitProjectDialog`，完整属性），也可在**任务弹窗内快速新建**（`OpenQuickProjectDialog`：弹出与标题栏相同的新建项目弹窗，**保留任务弹窗**，校验与弹窗一致——重名红字提示、保持打开、输入保留；创建成功自动选中新项目、焦点回落标题框，创建成功才落盘 `Op::InsertProject`）；可带可选起止时间（`Project.started_at` / `finished_at`；**开始必须早于结束**）；编辑走项目栏下方展开的**全宽编辑面板**（`StartEditProject` / `SaveEditProject`，名称 + 起止时间可改，**重名校验排除自身**）；删除项目时其下任务 `project_id` 置 `None`（不级联删任务）；被删项目处于筛选/编辑态时同步复位。
 7. **新任务插在最前**（`todos.insert(0, ...)`）；**任务添加统一走「＋ 添加任务」弹窗**（`SubmitAddDialog`，`App.input` / 快捷输入行已移除）；标题 / 描述 / 项目名输入均自动 `trim()`，空白标题静默忽略且保留输入框内容；空白描述存为空字符串（`Todo.description` 恒为 `String`，空串 = 无描述，卡片不显示空描述行）；优先级（`Option<Priority>`）在弹窗 / 编辑表单设置，未设置不显示徽章、排序排最后；弹窗校验不过（空白标题 / 截止时间格式非法 / 项目不存在）时弹窗保持打开、输入保留；时间取自 `app.now`。**任务弹窗不持有快速新建项目状态**：点「＋ 新建」经 `OpenQuickProjectDialog` 复用新建项目弹窗（`App.project_dialog`），任务弹窗内容保留，创建成功后 `AddDialog.project_id` 自动选中新项目。
-8. **项目筛选、弹窗表单、下拉菜单、归档开关与编辑表单是纯 UI 状态**（`App.selected_project` / `App.add_dialog` / `App.project_dialog` / `App.show_completed` / `App.add_menu_open` / `App.project_edit` / `App.todo_edit`）：只存内存、**不参与持久化**，启动默认全部 / 关闭 / 无编辑；各弹窗与编辑表单的打开/关闭/输入变化均不触发落盘（`SubmitAddDialog` 创建成功、`SubmitProjectDialog` 创建成功、`SaveEditProject` / `SaveEditTodo` 保存成功才落盘）；任务 / 项目 / 归档三个弹窗**互斥**（打开一个关闭其余），**例外：任务弹窗内「＋ 新建」（`OpenQuickProjectDialog`）叠加打开项目弹窗**——`add_dialog` 保留，视图叠加层项目弹窗优先渲染，Esc / 遮罩 / 取消仅关闭项目弹窗并返回任务弹窗（输入保留）；标题栏下拉菜单（`ToggleAddMenu`）打开时打开任一弹窗即自动收起（`OpenAddDialog` / `OpenProjectDialog` / `OpenCompletedDialog` 清 `add_menu_open`），点击外部 / Esc / 再点「▾」关闭；`CloseActiveDialog` 按「项目弹窗 → 任务弹窗 → 下拉菜单 → 归档」顺序关闭。
+8. **项目筛选、弹窗表单、下拉菜单、归档/统计开关与编辑表单是纯 UI 状态**（`App.selected_project` / `App.add_dialog` / `App.project_dialog` / `App.show_completed` / `App.show_stats` / `App.stats_dimension` / `App.add_menu_open` / `App.project_edit` / `App.todo_edit`）：只存内存、**不参与持久化**，启动默认全部 / 关闭 / 周 / 无编辑；各弹窗与编辑表单的打开/关闭/输入变化均不触发落盘（`SubmitAddDialog` 创建成功、`SubmitProjectDialog` 创建成功、`SaveEditProject` / `SaveEditTodo` 保存成功才落盘）；任务 / 项目 / 归档 / 统计四个弹窗**互斥**（打开一个关闭其余；`OpenStatsDialog` 额外重置维度「周」），**例外：任务弹窗内「＋ 新建」（`OpenQuickProjectDialog`）叠加打开项目弹窗**——`add_dialog` 保留，视图叠加层项目弹窗优先渲染，Esc / 遮罩 / 取消仅关闭项目弹窗并返回任务弹窗（输入保留）；标题栏下拉菜单（`ToggleAddMenu`）打开时打开任一弹窗即自动收起（`OpenAddDialog` / `OpenProjectDialog` / `OpenCompletedDialog` / `OpenStatsDialog` 清 `add_menu_open`），点击外部 / Esc / 再点「▾」关闭；`CloseActiveDialog` 按「项目弹窗 → 任务弹窗 → 下拉菜单 → 归档 → 统计」顺序关闭。
     **例外：排序与主题偏好持久化**（`App.sort_mode` / `App.project_sort_mode` / `App.theme_mode`，R22/R24/R26）——存独立 `settings.json`（`storage::save_settings`，不入 SQLite）、启动经 `Loaded` 恢复，`SortModeChanged` / `ProjectSortModeChanged` / `CycleThemeMode` 切换即触发落盘。
 9. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。
 10. **错误不崩溃**：数据文件缺失视为空数据；损坏数据库 / settings.json 返回错误并显示在 UI（`app.error`），绝不 panic。

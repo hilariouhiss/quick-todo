@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::model::{
     AddDialog, App, ParsedField, Priority, Project, ProjectDialog, ProjectEdit, QuickDue, SortMode,
-    Todo, TodoEdit, TodoStatus,
+    StatsDimension, Todo, TodoEdit, TodoStatus,
 };
 use crate::storage::{self, Op, Store};
 use crate::validate;
@@ -57,6 +57,12 @@ pub enum Message {
     OpenCompletedDialog,
     /// 关闭已完成归档弹窗（纯 UI 状态，不落盘）
     CloseCompletedDialog,
+    /// 打开完成统计弹窗（纯 UI 状态，不落盘；互斥关其余弹窗并重置维度「周」）
+    OpenStatsDialog,
+    /// 关闭完成统计弹窗（纯 UI 状态，不落盘）
+    CloseStatsDialog,
+    /// 统计弹窗：维度切换（纯内存，不落盘）
+    StatsDimensionChanged(StatsDimension),
     /// 开始编辑项目：进入项目栏下方展开的编辑面板并预填名称与起止时间
     StartEditProject(Uuid),
     /// 编辑：名称输入框变化
@@ -188,9 +194,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::OpenProjectDialog => {
-            // 弹窗互斥：打开项目弹窗时关闭任务弹窗与归档弹窗（并收起下拉菜单）
+            // 弹窗互斥：打开项目弹窗时关闭任务 / 归档 / 统计弹窗（并收起下拉菜单）
             app.add_dialog = None;
             app.show_completed = false;
+            app.show_stats = false;
             app.add_menu_open = false;
             app.project_dialog = Some(ProjectDialog::default());
             // 聚焦弹窗名称输入框（下一次渲染生效）
@@ -272,9 +279,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::OpenCompletedDialog => {
-            // 弹窗互斥：打开归档弹窗时关闭任务 / 项目弹窗（并收起下拉菜单）
+            // 弹窗互斥：打开归档弹窗时关闭任务 / 项目 / 统计弹窗（并收起下拉菜单）
             app.add_dialog = None;
             app.project_dialog = None;
+            app.show_stats = false;
             app.add_menu_open = false;
             app.show_completed = true;
         }
@@ -282,6 +290,27 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::CloseCompletedDialog => {
             // 关闭归档弹窗（纯 UI 状态，不落盘）
             app.show_completed = false;
+        }
+
+        Message::OpenStatsDialog => {
+            // 弹窗互斥：打开统计弹窗时关闭任务 / 项目 / 归档弹窗（并收起下拉菜单），
+            // 重置维度为「周」（每次打开默认「周」）
+            app.add_dialog = None;
+            app.project_dialog = None;
+            app.show_completed = false;
+            app.add_menu_open = false;
+            app.stats_dimension = StatsDimension::default();
+            app.show_stats = true;
+        }
+
+        Message::CloseStatsDialog => {
+            // 关闭统计弹窗（纯 UI 状态，不落盘）
+            app.show_stats = false;
+        }
+
+        Message::StatsDimensionChanged(dimension) => {
+            // 维度切换：纯内存（统计弹窗打开时才可达；防御性直接覆盖）
+            app.stats_dimension = dimension;
         }
 
         Message::StartEditProject(id) => {
@@ -392,16 +421,21 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::ToggleAddMenu => {
             // 防御：任一弹窗打开时不可展开菜单（按钮被遮罩覆盖，UI 不可达）
-            if app.add_dialog.is_some() || app.project_dialog.is_some() || app.show_completed {
+            if app.add_dialog.is_some()
+                || app.project_dialog.is_some()
+                || app.show_completed
+                || app.show_stats
+            {
                 return Task::none();
             }
             app.add_menu_open = !app.add_menu_open;
         }
 
         Message::OpenAddDialog => {
-            // 弹窗互斥：打开任务弹窗时关闭项目弹窗与归档弹窗（并收起下拉菜单）
+            // 弹窗互斥：打开任务弹窗时关闭项目 / 归档 / 统计弹窗（并收起下拉菜单）
             app.project_dialog = None;
             app.show_completed = false;
+            app.show_stats = false;
             app.add_menu_open = false;
             // 弹窗打开：处于项目筛选时预选该项目，作为默认归属
             app.add_dialog = Some(AddDialog {
@@ -426,8 +460,12 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             } else if app.add_menu_open {
                 // 下拉菜单：位于弹窗之后、归档之前（菜单与弹窗互斥，此分支仅防御）
                 app.add_menu_open = false;
-            } else {
+            } else if app.show_completed {
+                // 归档弹窗：位于统计弹窗之前（先归档后统计）
                 app.show_completed = false;
+            } else {
+                // 统计弹窗：最后关闭
+                app.show_stats = false;
             }
         }
 
@@ -793,6 +831,109 @@ mod tests {
 
         let _ = update(&mut app, Message::CloseCompletedDialog);
         assert!(!app.show_completed);
+    }
+
+    // ---------- 统计弹窗 ----------
+
+    #[test]
+    fn open_stats_dialog_resets_dimension_and_closes_others() {
+        let mut app = App::default();
+        // 构造「其他弹窗打开 + 菜单展开 + 维度非默认」的混合状态
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::OpenCompletedDialog); // 关闭任务弹窗、打开归档
+        app.add_menu_open = true; // 手工置位（互斥之外可由点击展开）
+        let _ = update(
+            &mut app,
+            Message::StatsDimensionChanged(StatsDimension::Project),
+        );
+
+        let _ = update(&mut app, Message::OpenStatsDialog);
+
+        assert!(app.show_stats);
+        assert_eq!(app.stats_dimension, StatsDimension::Week); // 重置为「周」
+        assert!(app.add_dialog.is_none());
+        assert!(app.project_dialog.is_none());
+        assert!(!app.show_completed);
+        assert!(!app.add_menu_open);
+    }
+
+    #[test]
+    fn stats_dialog_is_mutually_exclusive_with_others() {
+        let mut app = App::default();
+        // 打开统计弹窗后打开任务弹窗：统计弹窗被关闭
+        let _ = update(&mut app, Message::OpenStatsDialog);
+        let _ = update(&mut app, Message::OpenAddDialog);
+        assert!(app.add_dialog.is_some());
+        assert!(!app.show_stats);
+
+        // 打开统计弹窗后打开项目弹窗：统计弹窗被关闭
+        let _ = update(&mut app, Message::OpenStatsDialog);
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        assert!(app.project_dialog.is_some());
+        assert!(!app.show_stats);
+
+        // 打开统计弹窗后打开归档弹窗：统计弹窗被关闭
+        let _ = update(&mut app, Message::OpenStatsDialog);
+        let _ = update(&mut app, Message::OpenCompletedDialog);
+        assert!(app.show_completed);
+        assert!(!app.show_stats);
+    }
+
+    #[test]
+    fn stats_dimension_changed_updates_dimension() {
+        let mut app = App::default();
+        let _ = update(
+            &mut app,
+            Message::StatsDimensionChanged(StatsDimension::Month),
+        );
+        assert_eq!(app.stats_dimension, StatsDimension::Month);
+        let _ = update(
+            &mut app,
+            Message::StatsDimensionChanged(StatsDimension::Project),
+        );
+        assert_eq!(app.stats_dimension, StatsDimension::Project);
+    }
+
+    #[test]
+    fn close_stats_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenStatsDialog);
+        assert!(app.show_stats);
+
+        let _ = update(&mut app, Message::CloseStatsDialog);
+        assert!(!app.show_stats);
+    }
+
+    #[test]
+    fn close_active_dialog_closes_completed_before_stats() {
+        let mut app = App::default();
+        // 归档与统计同开（UI 不可达，防御路径）：先关归档，再关统计
+        let _ = update(&mut app, Message::OpenStatsDialog);
+        app.show_completed = true;
+        let _ = update(&mut app, Message::CloseActiveDialog);
+        assert!(!app.show_completed);
+        assert!(app.show_stats);
+
+        let _ = update(&mut app, Message::CloseActiveDialog);
+        assert!(!app.show_stats);
+    }
+
+    #[test]
+    fn close_active_dialog_closes_stats_last() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenStatsDialog);
+
+        let _ = update(&mut app, Message::CloseActiveDialog);
+        assert!(!app.show_stats);
+    }
+
+    #[test]
+    fn toggle_menu_blocked_when_stats_open() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenStatsDialog);
+
+        let _ = update(&mut app, Message::ToggleAddMenu);
+        assert!(!app.add_menu_open);
     }
 
     #[test]

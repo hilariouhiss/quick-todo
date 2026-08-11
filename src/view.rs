@@ -14,15 +14,19 @@ pub(crate) mod theme;
 pub(crate) mod tokens;
 
 use chrono::{DateTime, Duration, Utc};
+use iced::alignment::Vertical as AlignVertical;
 use iced::font::Weight;
+use iced::mouse;
+use iced::widget::canvas::{self, Cache, Canvas, Geometry, Path, Stroke, Text as CanvasText};
 use iced::widget::{
     PickList, Space, button, column, container, mouse_area, opaque, pick_list, row, scrollable,
     stack, text, text_input, tooltip,
 };
-use iced::{Alignment, Background, Border, Color, Element, Font, Length};
+use iced::{Alignment, Background, Border, Color, Element, Font, Length, Point, Rectangle, Size};
 use uuid::Uuid;
 
-use crate::model::{App, Priority, Project, QuickDue, SortMode, Todo, TodoStatus};
+use crate::model::{App, Priority, Project, QuickDue, SortMode, StatsDimension, Todo, TodoStatus};
+use crate::stats::{self, Bucket};
 use crate::update::Message;
 use crate::validate;
 use theme::{SemColors, extended, sem, sem_colors};
@@ -35,6 +39,14 @@ const QUICK_DUE_OPTIONS: [QuickDue; 3] = [QuickDue::Today, QuickDue::Tomorrow, Q
 
 /// 排序方式下拉的固定选项（任务区与项目栏共用）。
 const SORT_MODES: [SortMode; 3] = [SortMode::Priority, SortMode::Due, SortMode::Combined];
+
+/// 统计维度下拉的固定选项（周 / 月 / 年 / 项目）。
+const STATS_DIMENSIONS: [StatsDimension; 4] = [
+    StatsDimension::Week,
+    StatsDimension::Month,
+    StatsDimension::Year,
+    StatsDimension::Project,
+];
 
 /// 优先级下拉的选项（"无" + 低 / 中 / 高）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +353,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(add_dialog_card(app))
     } else if app.show_completed {
         Some(completed_dialog_card(app))
+    } else if app.show_stats {
+        Some(stats_dialog_card(app))
     } else {
         None
     };
@@ -598,6 +612,377 @@ fn completed_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     .padding(PADDING_DIALOG)
     .style(card_style)
     .into()
+}
+
+// ---------- 统计弹窗 ----------
+
+/// 统计弹窗卡片：标题行（完成统计 + 维度下拉 + 关闭）+ 汇总数字行 + 图表区
+/// （scrollable 兜底；两张 canvas 图表——周 / 月 / 年纵柱状图、项目横条形图）。
+fn stats_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
+    let s = sem(app);
+    let now = app.now;
+
+    // 汇总（全局，不随维度变化）
+    let totals = stats::totals(&app.todos, now);
+
+    // 图表桶（按维度生成一次，两张图共用）
+    let buckets: Vec<Bucket> = match app.stats_dimension {
+        StatsDimension::Week => stats::week_buckets(&app.todos, now, 12),
+        StatsDimension::Month => stats::month_buckets(&app.todos, now, 12),
+        StatsDimension::Year => stats::year_buckets(&app.todos, now),
+        StatsDimension::Project => stats::project_buckets(&app.todos, &app.projects, now),
+    };
+
+    // 空态：完成数全 0（与耗时无关——缺 started_at 的任务仍计入数量）
+    let empty = buckets.iter().all(|b| b.count == 0);
+
+    // 图表区：两张图（周期维度 = 纵柱状图；项目维度 = 横条形图）
+    let charts: Element<'_, Message> = if empty {
+        container(text("暂无已完成任务").size(FONT_BODY).color(s.muted))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into()
+    } else {
+        let (kind, count_title, duration_title) = match app.stats_dimension {
+            StatsDimension::Project => (ChartKind::Horizontal, "各项目完成数", "各项目总耗时"),
+            _ => (ChartKind::Vertical, "完成数量", "总耗时"),
+        };
+        column![
+            stats_chart(kind, count_title, buckets.clone(), count_value, false, app),
+            stats_chart(kind, duration_title, buckets, duration_value, true, app),
+        ]
+        .spacing(SPACE_M)
+        .into()
+    };
+
+    // 汇总数字行：第一行 总完成 · 总耗时 · 平均耗时；第二行 最长（含任务名截断）
+    let (longest_duration, longest_title) = match &totals.longest {
+        Some((_, title, d)) => (format_duration(*d), truncate(title, 12)),
+        None => ("—".into(), "—".into()),
+    };
+    let summary = column![
+        row![
+            text("总完成").size(FONT_SMALL).color(s.muted),
+            text(totals.done_count.to_string())
+                .size(FONT_SMALL)
+                .font(BOLD),
+            text("·").size(FONT_SMALL).color(s.muted),
+            text("总耗时").size(FONT_SMALL).color(s.muted),
+            text(format_duration(totals.total))
+                .size(FONT_SMALL)
+                .font(BOLD),
+            text("·").size(FONT_SMALL).color(s.muted),
+            text("平均耗时").size(FONT_SMALL).color(s.muted),
+            text(format_duration(totals.avg))
+                .size(FONT_SMALL)
+                .font(BOLD),
+        ]
+        .spacing(SPACE_XS)
+        .align_y(Alignment::Center),
+        row![
+            text("最长").size(FONT_SMALL).color(s.muted),
+            text(format!("{longest_duration} · {longest_title}"))
+                .size(FONT_SMALL)
+                .font(BOLD),
+        ]
+        .spacing(SPACE_XS)
+        .align_y(Alignment::Center)
+    ]
+    .spacing(SPACE_XS);
+
+    container(
+        column![
+            // 标题行：完成统计 + 维度下拉 + 关闭
+            row![
+                text("完成统计").size(FONT_DIALOG_TITLE).font(BOLD),
+                Space::new().width(Length::Fill),
+                dimension_picker(app),
+                Space::new().width(SPACE_S),
+                button(text("关闭").size(FONT_HEADER))
+                    .on_press(Message::CloseStatsDialog)
+                    .padding(BTN_LARGE),
+            ]
+            .align_y(Alignment::Center),
+            summary,
+            // 图表区：scrollable 兜底（内容超高时可滚动）
+            scrollable(charts).height(Length::Fill),
+        ]
+        .spacing(SPACE_L)
+        .width(Length::Fixed(STATS_DIALOG_WIDTH))
+        .height(Length::Fixed(STATS_DIALOG_HEIGHT)),
+    )
+    .padding(PADDING_DIALOG)
+    .style(card_style)
+    .into()
+}
+
+/// 统计维度下拉（周 / 月 / 年 / 项目，同款 pick_list 样式）。
+fn dimension_picker<'a>(app: &'a App) -> Element<'a, Message> {
+    PickList::new(
+        &STATS_DIMENSIONS[..],
+        Some(app.stats_dimension),
+        Message::StatsDimensionChanged,
+    )
+    .style(pick_list_style)
+    .text_size(FONT_BODY)
+    .padding([SPACE_XS, SPACE_M])
+    .into()
+}
+
+/// 图表方向：纵柱状图（周期维度：周 / 月 / 年）或横条形图（项目维度）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChartKind {
+    /// 纵柱状图：每周期一根竖柱
+    Vertical,
+    /// 横条形图：每项目一行横条
+    Horizontal,
+}
+
+/// 统计图表 canvas 程序：静态柱状图 / 条形图（手绘，零依赖）。
+///
+/// 每次 view 重建即构造新实例（含新 Cache，恒空、draw 闭包全量执行）——
+/// 数据量小（≤12 桶 / ≤项目数行）无性能问题；不把实例提升为 App 字段。
+struct StatsChart {
+    cache: Cache,
+    kind: ChartKind,
+    buckets: Vec<Bucket>,
+    /// 值提取：count（完成数）或 total（耗时秒数）
+    value: fn(&Bucket) -> f64,
+    /// 值语义：耗时（秒）→ 短格式标注；否则整数标注
+    is_duration: bool,
+    dark: bool,
+}
+
+/// 图表组件：小标题 + 画布（固定高 `CHART_HEIGHT`）。
+fn stats_chart<'a>(
+    kind: ChartKind,
+    title: &'a str,
+    buckets: Vec<Bucket>,
+    value: fn(&Bucket) -> f64,
+    is_duration: bool,
+    app: &'a App,
+) -> Element<'a, Message> {
+    column![
+        text(title).size(FONT_TINY).color(sem(app).muted),
+        Canvas::new(StatsChart {
+            cache: Cache::new(),
+            kind,
+            buckets,
+            value,
+            is_duration,
+            dark: app.is_dark(),
+        })
+        .width(Length::Fill)
+        .height(Length::Fixed(CHART_HEIGHT)),
+    ]
+    .spacing(SPACE_XXS)
+    .into()
+}
+
+/// 桶值：完成数量。
+fn count_value(b: &Bucket) -> f64 {
+    b.count as f64
+}
+
+/// 桶值：总耗时（秒）。
+fn duration_value(b: &Bucket) -> f64 {
+    b.total.num_seconds().max(0) as f64
+}
+
+impl canvas::Program<Message> for StatsChart {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        theme: &iced::Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let geometry = self
+            .cache
+            .draw(renderer, bounds.size(), |frame| match self.kind {
+                ChartKind::Vertical => self.draw_vertical(frame, theme, bounds),
+                ChartKind::Horizontal => self.draw_horizontal(frame, theme, bounds),
+            });
+        vec![geometry]
+    }
+}
+
+impl StatsChart {
+    /// 纵柱状图：Y 轴刻度 + 水平网格线 + 柱（末桶 = 当前周期高亮）+ 柱顶外侧数值 + X 轴周期标签。
+    fn draw_vertical(&self, frame: &mut canvas::Frame, theme: &iced::Theme, bounds: Rectangle) {
+        let palette = theme.extended_palette();
+        let text_color = sem_colors(self.dark).muted;
+        let grid_color = palette.background.strong.color;
+        let bar_color = palette.primary.base.color;
+        let bar_current = palette.primary.strong.color;
+
+        let n = self.buckets.len();
+        if n == 0 {
+            return;
+        }
+        let max = self
+            .buckets
+            .iter()
+            .map(|b| (self.value)(b))
+            .fold(0.0f64, f64::max)
+            .max(1.0); // 全 0 时退化为 1，避免除零
+
+        // 布局：左 Y 轴标签区 / 顶部数值留白 / 底部 X 轴标签区
+        let axis_w = 44.0;
+        let x_label_h = 16.0;
+        let top = 14.0;
+        let plot = Rectangle {
+            x: bounds.x + axis_w,
+            y: bounds.y + top,
+            width: bounds.width - axis_w,
+            height: bounds.height - top - x_label_h,
+        };
+
+        // 网格线 + Y 轴刻度（4 等分）
+        for i in 0..=4 {
+            let t = i as f32 / 4.0;
+            let y = plot.y + plot.height * (1.0 - t);
+            let value = max * f64::from(t);
+            frame.stroke(
+                &Path::line(Point::new(plot.x, y), Point::new(plot.x + plot.width, y)),
+                Stroke::default().with_width(1.0).with_color(grid_color),
+            );
+            frame.fill_text(CanvasText {
+                content: chart_value_label(value, self.is_duration),
+                position: Point::new(plot.x - SPACE_XS, y - 6.0),
+                color: text_color,
+                size: FONT_TINY.into(),
+                align_x: iced::widget::text::Alignment::Right,
+                ..CanvasText::default()
+            });
+        }
+
+        // 柱 + 柱顶数值 + X 轴标签
+        let slot = plot.width / n as f32;
+        let bar_w = (slot * 0.7).max(1.0);
+        for (i, b) in self.buckets.iter().enumerate() {
+            let v = (self.value)(b);
+            let h = plot.height * (v / max) as f32;
+            let x = plot.x + slot * i as f32 + (slot - bar_w) / 2.0;
+            // 末桶 = 当前周期（窗口恒含当前周期，view 数据约定）
+            let color = if i == n - 1 { bar_current } else { bar_color };
+            frame.fill_rectangle(
+                Point::new(x, plot.y + plot.height - h),
+                Size::new(bar_w, h.max(0.0)),
+                color,
+            );
+            // 柱顶外侧数值（柱上放文字与柱色对比度未锁定，故画在柱外背景底上）
+            if v > 0.0 {
+                frame.fill_text(CanvasText {
+                    content: chart_value_label(v, self.is_duration),
+                    position: Point::new(x + bar_w / 2.0, plot.y + plot.height - h - 2.0),
+                    color: text_color,
+                    size: FONT_TINY.into(),
+                    align_x: iced::widget::text::Alignment::Center,
+                    ..CanvasText::default()
+                });
+            }
+            // X 轴周期标签
+            frame.fill_text(CanvasText {
+                content: b.label.clone(),
+                position: Point::new(x + bar_w / 2.0, plot.y + plot.height + 2.0),
+                color: text_color,
+                size: FONT_TINY.into(),
+                align_x: iced::widget::text::Alignment::Center,
+                ..CanvasText::default()
+            });
+        }
+    }
+
+    /// 横条形图：每项目一行——行标签（截断）+ 横条（宽 = 值 / 最大值）+ 行尾数值。
+    fn draw_horizontal(&self, frame: &mut canvas::Frame, theme: &iced::Theme, bounds: Rectangle) {
+        let palette = theme.extended_palette();
+        let text_color = sem_colors(self.dark).muted;
+        let bar_color = palette.primary.base.color;
+
+        let n = self.buckets.len();
+        if n == 0 {
+            return;
+        }
+        let max = self
+            .buckets
+            .iter()
+            .map(|b| (self.value)(b))
+            .fold(0.0f64, f64::max)
+            .max(1.0);
+
+        let label_w = 64.0;
+        let pad = 4.0;
+        let row_h = bounds.height / n as f32;
+        let bar_area_w = bounds.width - label_w;
+        for (i, b) in self.buckets.iter().enumerate() {
+            let y = bounds.y + row_h * i as f32;
+            // 行标签（截断）
+            frame.fill_text(CanvasText {
+                content: truncate(&b.label, 6),
+                position: Point::new(bounds.x, y + row_h / 2.0),
+                color: text_color,
+                size: FONT_TINY.into(),
+                align_y: AlignVertical::Center,
+                ..CanvasText::default()
+            });
+            // 横条
+            let v = (self.value)(b);
+            let bar_w = bar_area_w * (v / max) as f32;
+            frame.fill_rectangle(
+                Point::new(bounds.x + label_w, y + pad),
+                Size::new(bar_w, (row_h - 2.0 * pad).max(2.0)),
+                bar_color,
+            );
+            // 行尾数值
+            frame.fill_text(CanvasText {
+                content: chart_value_label(v, self.is_duration),
+                position: Point::new(bounds.x + label_w + bar_w + SPACE_XS, y + row_h / 2.0),
+                color: text_color,
+                size: FONT_TINY.into(),
+                align_y: AlignVertical::Center,
+                ..CanvasText::default()
+            });
+        }
+    }
+}
+
+/// 图表内数值标注：数量 = 整数；耗时 = 短格式（`3.2 小时` / `45 分` / `30 秒`，
+/// 不用 `format_duration` 长文本——柱顶 / 行尾画不下）。
+fn chart_value_label(v: f64, is_duration: bool) -> String {
+    if is_duration {
+        short_duration(Duration::seconds(v as i64))
+    } else {
+        format!("{}", v as i64)
+    }
+}
+
+/// 耗时短格式（图表内标注用）。
+fn short_duration(d: Duration) -> String {
+    let secs = d.num_seconds().max(0);
+    if secs >= 3600 {
+        format!("{:.1} 小时", secs as f64 / 3600.0)
+    } else if secs >= 60 {
+        format!("{} 分", secs / 60)
+    } else {
+        format!("{secs} 秒")
+    }
+}
+
+/// 截断文本（超长加 …；按字符计，中文安全）。
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let mut t: String = s.chars().take(max_chars).collect();
+        t.push('…');
+        t
+    }
 }
 
 /// 归档弹窗中的紧凑行：标题 + 项目 / 完成时间 / 总耗时 + 删除。
@@ -1023,8 +1408,8 @@ fn theme_indicator(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-/// 右下角统计：`共 x 项 | 未开始 x | 进行中 x | 已完成 x` 单行文本（无外壳，footer 横条内）；
-/// 「已完成 x」为可点击链接（主色 + 粗体，悬停加深），打开归档弹窗；其余段纯展示。
+/// 右下角统计：`共 x 项 | 未开始 x | 进行中 x | 已完成 x | 统计` 单行文本（无外壳，footer 横条内）；
+/// 「已完成 x」与「统计」为可点击链接（主色 + 粗体，悬停加深），分别打开归档 / 统计弹窗；其余段纯展示。
 fn stats_group(app: &App) -> Element<'_, Message> {
     let total = app.todos.len();
     let pending = app
@@ -1051,6 +1436,10 @@ fn stats_group(app: &App) -> Element<'_, Message> {
         text(" | ").size(FONT_BODY).color(sem(app).muted),
         button(text(format!("已完成 {done}")).size(FONT_BODY).font(BOLD))
             .on_press(Message::OpenCompletedDialog)
+            .style(link_button_style),
+        text(" | ").size(FONT_BODY).color(sem(app).muted),
+        button(text("统计").size(FONT_BODY).font(BOLD))
+            .on_press(Message::OpenStatsDialog)
             .style(link_button_style),
     ]
     .align_y(Alignment::Center)
@@ -1755,6 +2144,25 @@ mod tests {
         let mut app = sample_app();
         app.todos.push(done_todo(&app, "已完成任务"));
         app.show_completed = true;
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_stats_dialog_week_with_data() {
+        // 统计弹窗：周维度 + 有已完成任务（纵柱状图 / 汇总行路径）
+        let mut app = sample_app();
+        app.todos.push(done_todo(&app, "已完成任务"));
+        app.show_stats = true;
+        app.stats_dimension = StatsDimension::Week;
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_stats_dialog_project_empty() {
+        // 统计弹窗：项目维度 + 无已完成任务（空态路径）
+        let mut app = sample_app();
+        app.show_stats = true;
+        app.stats_dimension = StatsDimension::Project;
         renders(&app);
     }
 

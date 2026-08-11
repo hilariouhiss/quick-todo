@@ -5,7 +5,7 @@ edition = "2024"
 description = "Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构），带时间追踪与 SQLite 持久化"
 
 [dependencies]
-iced = { version = "0.14", features = ["tokio", "debug", "time-travel"] }
+iced = { version = "0.14", features = ["tokio", "debug", "time-travel", "canvas"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v7", "fast-rng"] }

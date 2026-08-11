@@ -103,6 +103,12 @@ pub(crate) const PADDING_DIALOG: f32 = 20.0;
 pub(crate) const DIALOG_WIDTH: f32 = 480.0;
 /// 容器：归档弹窗高度
 pub(crate) const DIALOG_HEIGHT: f32 = 480.0;
+/// 容器：统计弹窗宽度（含图表区）
+pub(crate) const STATS_DIALOG_WIDTH: f32 = 560.0;
+/// 容器：统计弹窗高度
+pub(crate) const STATS_DIALOG_HEIGHT: f32 = 560.0;
+/// 图表：统计图表画布固定高度
+pub(crate) const CHART_HEIGHT: f32 = 150.0;
 /// 表单：标签列宽
 pub(crate) const LABEL_WIDTH: f32 = 72.0;
 /// 表单：编辑面板优先级列宽

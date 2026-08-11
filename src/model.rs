@@ -98,6 +98,40 @@ pub type CombinedOrderKey = (
     (bool, Option<DateTime<Utc>>),
 );
 
+/// 统计面板的维度：周 / 月 / 年 / 项目。
+/// **纯 UI 状态**（不序列化、不持久化），每次打开弹窗重置为缺省 `Week`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StatsDimension {
+    /// 最近 12 周
+    #[default]
+    Week,
+    /// 最近 12 个月
+    Month,
+    /// 全部年份
+    Year,
+    /// 各项目（全部历史）
+    Project,
+}
+
+impl StatsDimension {
+    /// 维度的中文显示名。
+    pub const fn label(self) -> &'static str {
+        match self {
+            StatsDimension::Week => "周",
+            StatsDimension::Month => "月",
+            StatsDimension::Year => "年",
+            StatsDimension::Project => "项目",
+        }
+    }
+}
+
+/// PickList 选项显示用（标签即中文显示名）。
+impl std::fmt::Display for StatsDimension {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// 主题模式：跟随系统 / 固定浅色 / 固定深色。
 /// 序列化存英文变体名（随 settings.json 持久化，缺省 `System`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -510,6 +544,10 @@ pub struct App {
     pub project_dialog: Option<ProjectDialog>,
     /// 已完成归档弹窗是否打开（纯 UI 状态，不持久化）
     pub show_completed: bool,
+    /// 完成统计弹窗是否打开（纯 UI 状态，不持久化）
+    pub show_stats: bool,
+    /// 统计弹窗当前维度（纯 UI 状态，不持久化；打开弹窗时重置为「周」）
+    pub stats_dimension: StatsDimension,
     /// 标题栏分体按钮的下拉菜单是否展开（纯 UI 状态，不持久化，默认关闭）
     pub add_menu_open: bool,
     /// 项目编辑面板表单（`None` = 未处于编辑态；纯内存状态，不持久化）
@@ -538,6 +576,8 @@ impl Default for App {
             add_dialog: None,
             project_dialog: None,
             show_completed: false,
+            show_stats: false,
+            stats_dimension: StatsDimension::default(),
             add_menu_open: false,
             project_edit: None,
             todo_edit: None,

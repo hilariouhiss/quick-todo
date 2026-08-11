@@ -52,6 +52,14 @@ impl Priority {
     }
 }
 
+/// 优先级排序键（任务 / 项目共用）：高→低，**未设置排最后**。
+/// 返回 `(是否未设置, 反转优先级)`，`Reverse` 使高优先级排前。
+pub(crate) fn priority_key(
+    priority: Option<Priority>,
+) -> (bool, Option<std::cmp::Reverse<Priority>>) {
+    (priority.is_none(), priority.map(std::cmp::Reverse))
+}
+
 /// 组内排序方式：优先级 / 截止日期 / 综合（优先级优先、同级按截止日期）。
 /// 序列化存英文变体名（随 Store 持久化，缺省 `Combined`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -73,6 +81,13 @@ impl SortMode {
             SortMode::Due => "截止日期",
             SortMode::Combined => "综合",
         }
+    }
+}
+
+/// PickList 选项显示用（标签即中文显示名）。
+impl std::fmt::Display for SortMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
     }
 }
 
@@ -146,7 +161,8 @@ pub struct Todo {
 
 impl Todo {
     /// 创建一条**仅标题**的新任务（无描述 / 无优先级 / 无项目 / 无截止时间；
-    /// 弹窗提交的纯标题场景使用，全字段走 `new_full`）。
+    /// 等价于 `new_full(title, "", None, None, None, now)`，**仅测试便捷使用**——
+    /// 生产提交路径恒走 `new_full`，无单独分支）。
     pub fn new(title: String, now: DateTime<Utc>) -> Self {
         Self::new_full(title, String::new(), None, None, None, now)
     }
@@ -202,13 +218,10 @@ impl Todo {
         (self.due_at.is_none(), self.due_at)
     }
 
-    /// 优先级排序键：高→低，**未设置排最后**。
+    /// 优先级排序键：高→低，**未设置排最后**（任务 / 项目共用 `priority_key`）。
     /// 返回 `(是否未设置, 反转优先级)`，`Reverse` 使高优先级排前。
     pub fn priority_order_key(&self) -> (bool, Option<std::cmp::Reverse<Priority>>) {
-        (
-            self.priority.is_none(),
-            self.priority.map(std::cmp::Reverse),
-        )
+        priority_key(self.priority)
     }
 
     /// 综合排序键：**优先级优先**（高→低），同级按截止日期升序；未设置均排最后。
@@ -236,7 +249,9 @@ pub struct Project {
 }
 
 impl Project {
-    /// 创建一条新项目（无优先级 / 无起止时间，此时即记录创建时间）。
+    /// 创建一条新项目（无优先级 / 无起止时间，此时即记录创建时间；
+    /// 等价于 `new_full(name, None, None, None, now)`，**仅测试便捷使用**——
+    /// 生产提交路径恒走 `new_full`，无单独分支）。
     pub fn new(name: String, now: DateTime<Utc>) -> Self {
         Self::new_full(name, None, None, None, now)
     }
@@ -261,10 +276,7 @@ impl Project {
 
     /// 优先级排序键（同任务）：高→低，未设置排最后。
     pub fn priority_order_key(&self) -> (bool, Option<std::cmp::Reverse<Priority>>) {
-        (
-            self.priority.is_none(),
-            self.priority.map(std::cmp::Reverse),
-        )
+        priority_key(self.priority)
     }
 
     /// 截止日期排序键：按**结束时间**（项目截止）升序，未设置排最后。
@@ -422,6 +434,13 @@ impl QuickDue {
     /// 生成回填到截止时间输入框的文本（如 `2026-01-31 23:59`）。
     pub fn due_text(self, now: DateTime<Utc>) -> String {
         format!("{}", self.target_date(now).format("%Y-%m-%d 23:59"))
+    }
+}
+
+/// PickList 选项显示用（标签即中文显示名）。
+impl std::fmt::Display for QuickDue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
     }
 }
 

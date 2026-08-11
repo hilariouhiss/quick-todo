@@ -251,12 +251,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
 
             // 校验通过：创建项目（含优先级与起止时间、时间取自 app.now）并关闭弹窗
+            // （new_full 的缺省参数已覆盖"纯名称"场景，无单独 new 分支）
             let project =
-                if dialog.priority.is_none() && started_at.is_none() && finished_at.is_none() {
-                    Project::new(name, app.now)
-                } else {
-                    Project::new_full(name, dialog.priority, started_at, finished_at, app.now)
-                };
+                Project::new_full(name, dialog.priority, started_at, finished_at, app.now);
             app.projects.push(project.clone());
             app.project_dialog = None;
             // 从任务弹窗打开（快速新建）：自动选中新项目，焦点回落标题框
@@ -509,24 +506,15 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
 
             // 校验通过：创建任务（插最前、时间取自 app.now）并关闭弹窗
-            let description = dialog.description.trim().to_owned();
-            let todo = if description.is_empty()
-                && dialog.priority.is_none()
-                && dialog.project_id.is_none()
-                && due_at.is_none()
-            {
-                // 纯标题场景
-                Todo::new(title, app.now)
-            } else {
-                Todo::new_full(
-                    title,
-                    description,
-                    dialog.priority,
-                    dialog.project_id,
-                    due_at,
-                    app.now,
-                )
-            };
+            // （new_full 的缺省参数已覆盖"纯标题"场景，无单独 new 分支）
+            let todo = Todo::new_full(
+                title,
+                dialog.description.trim().to_owned(),
+                dialog.priority,
+                dialog.project_id,
+                due_at,
+                app.now,
+            );
             app.todos.insert(0, todo.clone());
             app.add_dialog = None;
             return persist(Op::InsertTodo(todo));

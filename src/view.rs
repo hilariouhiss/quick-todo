@@ -220,12 +220,6 @@ fn pick_list_style(theme: &iced::Theme, status: pick_list::Status) -> pick_list:
     }
 }
 
-impl std::fmt::Display for SortMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
 const BOLD: Font = Font {
     weight: Weight::Bold,
     ..Font::DEFAULT
@@ -1532,12 +1526,6 @@ impl ProjectChoice {
 impl std::fmt::Display for ProjectChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.label)
-    }
-}
-
-impl std::fmt::Display for QuickDue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
     }
 }
 

@@ -342,15 +342,15 @@ fn load_db_sync(path: &Path) -> Result<(Vec<Todo>, Vec<Project>), String> {
     let rows = stmt
         .query_map([], |row| {
             Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
+                row.get::<_, String>("id")?,
+                row.get::<_, String>("title")?,
+                row.get::<_, String>("description")?,
+                row.get::<_, Option<String>>("priority")?,
+                row.get::<_, Option<String>>("project_id")?,
+                row.get::<_, Option<String>>("due_at")?,
+                row.get::<_, String>("created_at")?,
+                row.get::<_, Option<String>>("started_at")?,
+                row.get::<_, Option<String>>("finished_at")?,
             ))
         })
         .map_err(|error| format!("读取任务失败: {error}"))?;
@@ -389,12 +389,12 @@ fn load_db_sync(path: &Path) -> Result<(Vec<Todo>, Vec<Project>), String> {
     let rows = stmt
         .query_map([], |row| {
             Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, String>(5)?,
+                row.get::<_, String>("id")?,
+                row.get::<_, String>("name")?,
+                row.get::<_, Option<String>>("priority")?,
+                row.get::<_, Option<String>>("started_at")?,
+                row.get::<_, Option<String>>("finished_at")?,
+                row.get::<_, String>("created_at")?,
             ))
         })
         .map_err(|error| format!("读取项目失败: {error}"))?;

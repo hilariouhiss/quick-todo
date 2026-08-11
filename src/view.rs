@@ -1140,7 +1140,6 @@ fn footer(app: &App) -> Element<'_, Message> {
         .align_y(Alignment::Center),
     )
     .width(Length::Fill)
-    .padding([SPACE_S, 0.0])
     .into()
 }
 

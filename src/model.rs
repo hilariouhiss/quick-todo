@@ -97,12 +97,12 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
-    /// 主题模式的中文显示名（主题切换按钮用）。
+    /// 主题模式的显示短名（左下角主题指示器用：`Theme: Auto/Light/Dark`）。
     pub const fn label(self) -> &'static str {
         match self {
-            ThemeMode::System => "跟随系统",
-            ThemeMode::Light => "浅色",
-            ThemeMode::Dark => "深色",
+            ThemeMode::System => "Auto",
+            ThemeMode::Light => "Light",
+            ThemeMode::Dark => "Dark",
         }
     }
 
@@ -692,9 +692,9 @@ mod tests {
     #[test]
     fn theme_mode_defaults_and_labels() {
         assert_eq!(ThemeMode::default(), ThemeMode::System);
-        assert_eq!(ThemeMode::System.label(), "跟随系统");
-        assert_eq!(ThemeMode::Light.label(), "浅色");
-        assert_eq!(ThemeMode::Dark.label(), "深色");
+        assert_eq!(ThemeMode::System.label(), "Auto");
+        assert_eq!(ThemeMode::Light.label(), "Light");
+        assert_eq!(ThemeMode::Dark.label(), "Dark");
     }
 
     #[test]

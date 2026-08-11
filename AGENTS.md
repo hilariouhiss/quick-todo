@@ -19,8 +19,8 @@ description: Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构�
 - 任务区**双列分组**：左=未开始、右=进行中（组内按截止时间排序）；已完成经底部 footer 统计「已完成 x」链接弹窗归档；任务添加统一走「＋ 添加任务」弹窗
 - 任务 / 项目可带可选**优先级**（无/低/中/高）；任务与项目列表可切换排序（优先级 / 截止日期 / 综合），偏好**持久化**到数据文件
 - 进行中任务显示**每秒实时**刷新耗时
-- 任务 / 项目存 SQLite（quick-todo.db），排序偏好与主题模式存 settings.json，重启不丢失
-- 主题跟随系统（浅 / 深自动切换），可手动循环切换（跟随系统 / 浅色 / 深色，偏好持久化）；视觉规范由 view.rs 顶部「设计令牌」常量统一（字号 / 间距 / 圆角 / 按钮规格）
+- 任务 / 项目存 SQLite（quick-todo.db），排序偏好与主题模式存 settings.json（原子写），重启不丢失
+- 主题跟随系统（浅 / 深自动切换），可手动循环切换（跟随系统 / 浅色 / 深色，偏好持久化）；视觉规范由 view/tokens.rs「设计令牌」常量统一（字号 / 间距 / 圆角 / 按钮规格），主题色板与语义色在 view/theme.rs（浅「晴空」/ 深「夜航」双板）
 
 技术栈：
 
@@ -31,7 +31,7 @@ description: Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构�
 | 时间          | chrono 0.4                                                                    |
 | ID            | uuid v7（时间有序）                                                           |
 | 持久化        | rusqlite 0.40（bundled）+ serde_json（仅 settings.json）                      |
-| 测试          | 内置单元测试 + iced_test（dev-dependency）                                    |
+| 测试          | 内置单元测试 + iced_test（dev-dependency）；日志依赖 tracing-subscriber（已声明、预留后续日志功能，当前未接线）        |
 
 ## 2. 常用命令
 
@@ -49,10 +49,14 @@ cargo fmt          # 代码格式化
 ```
 src/
 ├── main.rs     入口：iced::application 装配（boot / update / view / subscription）
-├── model.rs    数据模型：Todo、Project、TodoStatus、App（纯数据，无 IO）
-├── update.rs   Message 枚举 + update 纯函数（状态流转、副作用派发）
-├── view.rs     视图：设计令牌常量 + 标题栏（分体按钮 + 下拉菜单）+ 项目单行栏（横向滚动芯片）+ 编辑面板 + 任务区（任务卡片/编辑模式、时间元信息）+ 弹窗（任务/项目添加）+ 底部 footer（主题指示器 + 统计文本横条）
-├── storage.rs  持久化：SQLite（quick-todo.db）+ settings.json，按 Op 增量写盘
+├── model.rs    数据模型：Todo、Project、TodoStatus、App 及表单状态（ParsedField 值对象；纯数据，无 IO）
+├── validate.rs 表单校验单一来源（TodoFormIssues / ProjectFormIssues 纯函数，view 与 update 共用）
+├── update.rs   Message 枚举 + update 纯函数（状态流转、校验调用、副作用派发）
+├── view.rs     视图：标题栏（分体按钮 + 下拉菜单）+ 项目单行栏（横向滚动芯片）+ 编辑面板 + 任务区（任务卡片/编辑模式、时间元信息）+ 弹窗（任务/项目添加）+ 底部 footer（主题指示器 + 统计文本横条）+ 表单行共享组件（project_picker_row / priority_row / due_row）
+├── view/
+│   ├── theme.rs   主题调色板（浅「晴空」/ 深「夜航」）+ 语义色双板 SemColors + 取板函数 + 对比度测试
+│   └── tokens.rs  设计令牌（字号/间距/圆角/按钮规格/容器宽度）+ 聚焦 widget Id
+└── storage.rs  持久化：SQLite（quick-todo.db）+ settings.json（原子写），按 Op 增量写盘
 docs/
 └── 需求与概要设计.md     需求与概要设计文档 —— 需求 R1-R27 + 非功能 N1-N7、架构图、验收标准，改行为前必读
 ```
@@ -79,18 +83,19 @@ docs/
 12. **卡片默认只读，修改须进编辑模式**：主界面任务卡片全部属性只读展示（项目归属也是只读文字，无 `AssignProject` 消息——归属只能经编辑模式保存）；点击「编辑」进入该卡片的编辑模式（即"当前任务"，`App.todo_edit`），可改标题 / 描述 / 项目 / 截止时间，保存校验同弹窗；**时间字段（创建 / 开始 / 结束）永不直接编辑**（自动记录，状态由它们推导）；切换编辑其他卡片时未保存修改被丢弃。
 13. **双列分组与归档**：任务区双列——左=未开始、右=进行中（各自独立滚动，组内按排序偏好排序、未设置均排最后、稳定排序，`Todo::due_order_key` / `priority_order_key` / `combined_order_key` 为排序键）；已完成任务不进双列，经底部 footer 统计「已完成 x」链接弹窗归档（按 `finished_at` 降序，**不受排序偏好影响**）；分组 / 排序属派生展示，放 view 内部私有函数，update 层不改列表顺序。
 14. **排序偏好、主题模式与优先级**：任务区右上角（统一标题行右端）与项目单行栏最左侧各自独立排序下拉（均无文字标签）（`sort_mode` / `project_sort_mode`，值：优先级 / 截止日期 / 综合=优先级优先同级按截止）；「综合」的截止键：任务=`due_at`、项目=`finished_at`（项目结束时间即截止日期）；「全部」芯片恒在项目栏最前；优先级展示：卡片徽章「高/中/低」（高红/中橙/低灰）、项目芯片彩色圆点；`Priority`（低<中<高，不序列化）、`SortMode`（库 / settings.json 存英文变体名，缺省 `Combined`）与 `ThemeMode`（**System / Light / Dark，settings.json 必填键**——旧文件缺键解析失败红字提示不迁移，缺省 `System`）——`SortMode` / `ThemeMode` 派生 `Serialize/Deserialize/Default`；`.theme()` 闭包**恒返回 `Some(Theme::custom(…))`**（两套自定义调色板）：System → 按 `App.is_dark()`（`App.system_dark` 经 `iced::system::theme_changes` 订阅实时更新，不持久化）显式映射，Light / Dark → 固定板，view 层语义色取板共用同一 `is_dark` 判定（iced 原生 `None` 跟随在手动 → Auto 切换时窗口边框 / 内容主题分裂，故不用）。
+15. **表单校验单一来源（validate.rs）**：任务表单（弹窗 / 卡片编辑）与项目表单（弹窗 / 编辑面板）的校验规则只有一份实现（`TodoFormIssues` / `ProjectFormIssues` 纯函数）——view 层据此派生按钮禁用与红字提示（`can_submit_*`），update 层提交时据此防御性拒绝（`todo_form_values` / `project_form_values`）。语义约定：`can_submit_todo` **不含** `missing_project`（项目被删后按钮仍可点、提交被拒，与历史行为逐位一致）；重名校验排除自身经 `exclude_id` 参数；消息级守卫（`DialogProjectChanged` / `EditProjectChanged`）用 `project_exists`，不属表单校验。表单时间输入统一 `ParsedField` 值对象（`input` 原文 + `parsed` 实时解析结果成对缓存；`changed` / `prefilled` / `new` 三种构造）。
 
 ## 5. 代码风格
 
-- 模块职责单一：model = 纯数据、update = 纯逻辑、view = 渲染、storage = IO；新增功能先判断归属，不跨层写代码。
+- 模块职责单一：model = 纯数据、update = 纯逻辑、view = 渲染、storage = IO、validate = 表单校验；新增功能先判断归属，不跨层写代码。
 - view 层不持有业务逻辑；派生展示（状态徽章、摘要、耗时格式化、项目计数、筛选）放在 view 内部私有函数。
-- 颜色、字体等视觉常量用模块级 `const`；主题颜色为两套自定义 `Palette`（`LIGHT_PALETTE`「晴空」/ `DARK_PALETTE`「夜航」）+ 语义色双板 `SemColors`（`muted / blue / done / accent / error`），对比度由 view 测试锁定（≥ 4.5:1）。
+- 颜色、字体等视觉常量用模块级 const：设计令牌在 view/tokens.rs，主题颜色为两套自定义 `Palette`（view/theme.rs `LIGHT_PALETTE`「晴空」/ `DARK_PALETTE`「夜航」）+ 语义色双板 `SemColors`（muted / blue / done / accent / error），对比度由 view/theme.rs 测试锁定（≥ 4.5:1）。
 - 新依赖直接在 Cargo.toml 的 `[dependencies]` 中声明（仅原生目标，无 wasm 分块）。
 - 提交前运行 `cargo fmt` 与 `cargo clippy`，保持零警告。
 
 ## 6. 测试约定
 
-- 测试写在各模块内 `#[cfg(test)] mod tests`，与被测代码同文件。
+- 测试写在各模块内 `#[cfg(test)] mod tests`，与被测代码同文件（子模块测试随子模块文件，如 view/theme.rs 自带对比度测试、view.rs 自带渲染冒烟测试）。
 - 纯逻辑用 `#[test]`；异步（storage IO）用 `#[tokio::test]`。
 - storage 测试使用临时文件（`std::env::temp_dir()` + 进程 id 命名，临时 `.db` / `settings.json`），用后删除。
 - 时间相关测试用固定时间戳（`Utc.timestamp_opt(...)`）构造，不用 `Utc::now()` 断言。

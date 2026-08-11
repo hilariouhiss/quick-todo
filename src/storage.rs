@@ -100,6 +100,7 @@ pub async fn apply(op: Op) -> Result<(), String> {
 }
 
 /// 整文件覆写排序偏好与主题模式（值均来自 app 当前状态，无读-改-写竞态）。
+/// 经 `write_settings_atomic` 原子替换：崩溃时目标文件要么是旧内容、要么是新内容，不会半写坏。
 pub async fn save_settings(
     sort_mode: SortMode,
     project_sort_mode: SortMode,
@@ -110,17 +111,42 @@ pub async fn save_settings(
         project_sort_mode,
         theme_mode,
     };
-    let path = settings_file();
+    write_settings_atomic(&settings_file(), &settings).await
+}
+
+/// 原子覆写 settings.json（供默认路径与测试复用）：
+/// 写同目录**唯一名**临时文件 → `rename` 原子替换。
+///
+/// - 唯一名（uuid 后缀）防并发 `save_settings`（快速连续切排序 / 主题，多个 Task 可同时在飞）
+///   互相截断 / 交错写同一临时文件；
+/// - `rename` 为原子替换（Windows 下 MoveFileEx + MOVEFILE_REPLACE_EXISTING，覆盖已存在文件成立），
+///   不做"删除目标再 rename"兜底（破坏原子性）；失败时尽力清理临时文件。
+async fn write_settings_atomic(path: &Path, settings: &Settings) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|error| format!("创建目录 {} 失败: {error}", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(&settings)
+    let json = serde_json::to_string_pretty(settings)
         .map_err(|error| format!("序列化设置失败: {error}"))?;
-    tokio::fs::write(&path, json)
-        .await
-        .map_err(|error| format!("写入 {} 失败: {error}", path.display()))
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("settings"),
+        Uuid::now_v7(),
+    ));
+    if let Err(error) = tokio::fs::write(&tmp, &json).await {
+        // 写入失败：清理残留临时文件（尽力而为），目标文件不受影响
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(format!("写入 {} 失败: {error}", path.display()));
+    }
+    if let Err(error) = tokio::fs::rename(&tmp, path).await {
+        // 替换失败：清理残留临时文件（尽力而为），目标文件保持旧内容
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(format!("写入 {} 失败: {error}", path.display()));
+    }
+    Ok(())
 }
 
 /// 从指定路径加载数据库内容（供测试复用）。
@@ -441,18 +467,9 @@ mod tests {
         std::env::temp_dir().join(format!("quick-todo-test-{}-{name}", std::process::id()))
     }
 
-    /// 向指定路径覆写 settings.json（测试辅助）。
+    /// 向指定路径覆写 settings.json（测试辅助，走真实原子写路径）。
     async fn save_settings_to(path: &Path, settings: Settings) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|error| format!("创建目录 {} 失败: {error}", parent.display()))?;
-        }
-        let json = serde_json::to_string_pretty(&settings)
-            .map_err(|error| format!("序列化设置失败: {error}"))?;
-        tokio::fs::write(path, json)
-            .await
-            .map_err(|error| format!("写入 {} 失败: {error}", path.display()))
+        write_settings_atomic(path, &settings).await
     }
 
     fn sample_todos() -> Vec<Todo> {
@@ -614,6 +631,65 @@ mod tests {
         assert_eq!(todos[0].project_id, None);
 
         let _ = std::fs::remove_file(&path).ok();
+    }
+
+    /// 断言指定路径所在目录无本测试产生的 `.tmp` 残留（原子写测试辅助）。
+    /// 只匹配以目标文件名开头的临时文件（临时目录混有系统其他组件的 `.tmp`，如
+    /// dict_cache / TCD / 裸 uuid 命名，不能全量扫描）。
+    async fn assert_no_tmp_leftover(path: &Path) {
+        let parent = path.parent().unwrap();
+        let target = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let leftovers: Vec<String> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(&target) && name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "残留临时文件: {leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn settings_atomic_overwrite_no_corruption() {
+        let path = temp_path("settings-atomic.json");
+        let _ = std::fs::remove_file(&path).ok();
+
+        // 连续覆写多次（模拟快速连续切换排序 / 主题）：每次目标内容完整、可解析
+        for mode in [SortMode::Priority, SortMode::Due, SortMode::Combined] {
+            save_settings_to(
+                &path,
+                Settings {
+                    sort_mode: mode,
+                    project_sort_mode: SortMode::Combined,
+                    theme_mode: ThemeMode::System,
+                },
+            )
+            .await
+            .unwrap();
+            let loaded = load_settings_from(&path).await.unwrap();
+            assert_eq!(loaded.sort_mode, mode, "覆写后内容应为最新完整值");
+        }
+
+        // 无 .tmp 残留（每次覆写的临时文件均已 rename 或清理）
+        assert_no_tmp_leftover(&path).await;
+        let _ = std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn settings_atomic_write_failure_leaves_no_tmp() {
+        // 失败路径：目标路径是目录（写入 / rename 均失败），应清理临时文件、目标不受影响
+        let dir = temp_path("settings-as-dir");
+        let _ = std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let result = save_settings_to(&dir, Settings::default()).await;
+        assert!(result.is_err());
+        assert_no_tmp_leftover(&dir).await;
+
+        let _ = std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

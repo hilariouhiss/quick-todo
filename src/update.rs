@@ -36,6 +36,8 @@ pub enum Message {
     Tick(DateTime<Utc>),
     /// 系统主题变化（订阅 `system::theme_changes` 实时跟随；纯运行期状态，不落盘）
     SystemThemeChanged(bool),
+    /// 图标字体加载完成（iced 0.14 无错误路径，仅作完成信号；纯运行期状态，不落盘）
+    FontLoaded,
     /// 任务排序方式切换（持久化偏好，触发落盘）
     SortModeChanged(SortMode),
     /// 项目排序方式切换（持久化偏好，触发落盘）
@@ -204,6 +206,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::SystemThemeChanged(dark) => {
             // 系统主题实时跟随（订阅 `system::theme_changes`；纯运行期状态，不落盘）
             app.system_dark = dark;
+        }
+
+        Message::FontLoaded => {
+            // 图标字体加载完成：无错误路径（iced 0.14 font::Error 为空枚举），无副作用
         }
 
         Message::SortModeChanged(mode) => {
@@ -1577,6 +1583,15 @@ mod tests {
 
         let _ = update(&mut app, Message::SystemThemeChanged(false));
         assert!(!app.system_dark);
+    }
+
+    #[test]
+    fn font_loaded_is_noop() {
+        // 图标字体加载完成信号：无错误路径、无副作用、不落盘
+        let mut app = App::default();
+        let _ = update(&mut app, Message::FontLoaded);
+        assert!(app.error.is_none());
+        assert!(app.todos.is_empty());
     }
 
     #[test]

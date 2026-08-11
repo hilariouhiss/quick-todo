@@ -1191,10 +1191,12 @@ fn done_row<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         ]
         .spacing(SPACE_XXS)
         .width(Length::Fill),
-        button(text("删除").size(FONT_SMALL))
-            .on_press(Message::DeleteTodo(todo.id))
-            .style(button::danger)
-            .padding(BTN_SMALL),
+        icon_action(
+            ICON_DELETE,
+            button::danger,
+            Message::DeleteTodo(todo.id),
+            "删除",
+        ),
     ]
     .align_y(Alignment::Center)
     .spacing(SPACE_M)
@@ -1940,6 +1942,71 @@ fn group_scroll<'a>(
 
 /// 单个任务的卡片：标题 + 可选描述 + 状态徽章 + 操作按钮 + 时间元信息。
 /// 默认全部属性只读展示；该卡片处于编辑模式时（"当前任务"）渲染可编辑表单。
+/// 图标字形（Material Symbols Outlined 字体，语义色着染）。
+fn icon_text(icon: char, size: f32, color: Color) -> Element<'static, Message> {
+    text(icon).font(ICON_FONT).size(size).color(color).into()
+}
+
+/// 图标操作按钮：图标字形（颜色继承按钮样式）+ tooltip 悬停提示。
+fn icon_action(
+    icon: char,
+    style: fn(&iced::Theme, button::Status) -> button::Style,
+    message: Message,
+    tooltip_text: &'static str,
+) -> Element<'static, Message> {
+    let btn = button(text(icon).font(ICON_FONT).size(FONT_ICON))
+        .on_press(message)
+        .style(style)
+        .padding(BTN_ICON);
+    tooltip(
+        btn,
+        text(tooltip_text).size(FONT_SMALL),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+/// 卡片头部图标操作区：按状态构成——Pending = ▶ + ✕ + ✎；InProgress = ✓ + ✕ + ✎；
+/// Done = ✕ + ✎（删除 / 编辑恒有）。
+fn icon_actions(todo: &Todo) -> Element<'_, Message> {
+    let mut actions = row![].spacing(SPACE_XS).align_y(Alignment::Center);
+
+    match todo.status() {
+        TodoStatus::Pending => {
+            actions = actions.push(icon_action(
+                ICON_PLAY,
+                button::primary,
+                Message::StartTodo(todo.id),
+                "开始",
+            ));
+        }
+        TodoStatus::InProgress => {
+            actions = actions.push(icon_action(
+                ICON_CHECK,
+                success_button,
+                Message::FinishTodo(todo.id),
+                "完成",
+            ));
+        }
+        TodoStatus::Done => {}
+    }
+
+    actions
+        .push(icon_action(
+            ICON_DELETE,
+            button::danger,
+            Message::DeleteTodo(todo.id),
+            "删除",
+        ))
+        .push(icon_action(
+            ICON_EDIT,
+            button::text,
+            Message::EditTodo(todo.id),
+            "编辑",
+        ))
+        .into()
+}
+
 fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     let s = sem(app);
     if app
@@ -1950,13 +2017,13 @@ fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         return todo_card_editor(todo, app);
     }
 
+    // 头部：标题 + 优先级徽章（保留）+ 图标操作区（状态经列位置表达，无文字徽章）
     let mut head = row![
         text(todo.title.as_str()).size(FONT_CARD_TITLE).font(BOLD),
         Space::new().width(Length::Fill),
     ]
     .align_y(Alignment::Center)
     .spacing(SPACE_M);
-    // 优先级徽章：未设置不显示
     if let Some(priority) = todo.priority {
         head = head.push(
             text(priority.label())
@@ -1964,41 +2031,130 @@ fn todo_card<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
                 .color(priority_color(s, priority)),
         );
     }
-    head = head
-        .push(
-            text(todo.status().label())
-                .size(FONT_SMALL)
-                .color(status_color(s, todo.status())),
-        )
-        .push(actions(todo));
+    head = head.push(icon_actions(todo));
 
     // 描述：非空时在标题下方以灰色小字显示（自动换行）
-    let mut content = column![head].spacing(SPACE_M);
+    let mut content = column![head].spacing(SPACE_S);
     if !todo.description.is_empty() {
         content = content.push(
             text(todo.description.as_str())
-                .size(FONT_BODY)
+                .size(FONT_SMALL)
                 .color(s.muted)
                 .width(Length::Fill),
         );
     }
-    content = content.push(meta_rows(todo, app));
-    // 编辑按钮：卡片右下角（进入编辑模式，即"当前任务"）
-    content = content.push(
-        row![
-            Space::new().width(Length::Fill),
-            button(text("编辑").size(FONT_BODY))
-                .on_press(Message::EditTodo(todo.id))
-                .style(button::text)
-                .padding(BTN_SMALL),
-        ]
-        .align_y(Alignment::Center),
-    );
+    // 元信息单行横排（高密度）：无任何项时整行省略
+    if let Some(meta) = meta_line(todo, app) {
+        content = content.push(meta);
+    }
 
     container(content)
         .width(Length::Fill)
-        .padding(12)
+        .padding(PADDING_CARD)
         .style(card_style)
+        .into()
+}
+
+/// 元信息单行横排（高密度）：项目 / 类型 / 截止时间 / 结束时间 / 耗时，图标 + 值；
+/// 无值不占位（全部无值时整行省略，返回 `None`）；项目 / 类型名超长截断防溢出。
+fn meta_line<'a>(todo: &'a Todo, app: &'a App) -> Option<Element<'a, Message>> {
+    let s = sem(app);
+    let mut items: Vec<Element<'_, Message>> = Vec::new();
+
+    // 项目（未归属不显示——与类型行规则统一，不再显示「无项目」占位）
+    if let Some(project) = todo
+        .project_id
+        .and_then(|id| app.projects.iter().find(|p| p.id == id))
+    {
+        items.push(meta_item(ICON_PROJECT, truncate(&project.name, 6), s.muted));
+    }
+    // 类型（未设置不显示）
+    if let Some(r#type) = todo
+        .type_id
+        .and_then(|id| app.types.iter().find(|t| t.id == id))
+    {
+        items.push(meta_item(ICON_TYPE, truncate(&r#type.name, 6), s.muted));
+    }
+    // 截止时间：逾期且未完成标红
+    if let Some(due) = todo.due_at {
+        let overdue = todo.status() != TodoStatus::Done && due < app.now;
+        items.push(meta_item(
+            ICON_DUE,
+            format_date(due),
+            if overdue { s.error } else { s.muted },
+        ));
+    }
+    // 结束时间：仅已完成显示（去"—"占位）
+    if let Some(finished) = todo.finished_at {
+        items.push(meta_item(ICON_CHECK, format_date(finished), s.muted));
+    }
+    // 耗时：进行中 = 已耗时（蓝）；已完成 = 总耗时（绿）；未开始不显示
+    if todo.status() != TodoStatus::Pending
+        && let Some(d) = todo.duration(app.now)
+    {
+        let (value, color) = if todo.status() == TodoStatus::Done {
+            (format_duration(d), s.done)
+        } else {
+            (format_duration(d), s.blue)
+        };
+        items.push(meta_item(ICON_DURATION, value, color));
+    }
+
+    if items.is_empty() {
+        None
+    } else {
+        Some(
+            row(items)
+                .spacing(SPACE_M)
+                .align_y(Alignment::Center)
+                .into(),
+        )
+    }
+}
+
+/// 元信息单项：图标 + 值（值文本已截断 + 禁换行，短值保证单行不溢出）。
+fn meta_item<'a>(icon: char, value: String, color: Color) -> Element<'a, Message> {
+    row![
+        icon_text(icon, FONT_SMALL, color),
+        text(value)
+            .size(FONT_SMALL)
+            .color(color)
+            .wrapping(iced::widget::text::Wrapping::None),
+    ]
+    .align_y(Alignment::Center)
+    .spacing(SPACE_XS)
+    .into()
+}
+
+/// 编辑模式底部只读时间行（高密度）：截止时间（逾期红）/ 耗时（进行中蓝、已完成绿）/ 结束时间
+/// （仅已完成）。不含项目 / 类型——编辑表单可修改，避免重复表达（R15）。
+fn editor_time_line<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
+    let s = sem(app);
+    let mut items: Vec<Element<'_, Message>> = Vec::new();
+
+    if let Some(due) = todo.due_at {
+        let overdue = todo.status() != TodoStatus::Done && due < app.now;
+        items.push(meta_item(
+            ICON_DUE,
+            format_date(due),
+            if overdue { s.error } else { s.muted },
+        ));
+    }
+    if let Some(d) = todo.duration(app.now) {
+        let (value, color) = if todo.status() == TodoStatus::Done {
+            (format_duration(d), s.done)
+        } else {
+            (format_duration(d), s.blue)
+        };
+        items.push(meta_item(ICON_DURATION, value, color));
+    }
+    if let Some(finished) = todo.finished_at {
+        items.push(meta_item(ICON_CHECK, format_date(finished), s.muted));
+    }
+
+    row(items)
+        .spacing(SPACE_M)
+        .align_y(Alignment::Center)
         .into()
 }
 
@@ -2009,40 +2165,6 @@ fn status_color(sem: SemColors, status: TodoStatus) -> Color {
         TodoStatus::InProgress => sem.blue,
         TodoStatus::Done => sem.done,
     }
-}
-
-/// 操作按钮：按状态显示"开始 / 完成"，始终有"删除"（「编辑」在卡片右下角）。
-fn actions(todo: &Todo) -> Element<'_, Message> {
-    let mut actions = row![].spacing(SPACE_S);
-
-    match todo.status() {
-        TodoStatus::Pending => {
-            actions = actions.push(
-                button(text("开始").size(FONT_BODY))
-                    .on_press(Message::StartTodo(todo.id))
-                    .style(button::primary)
-                    .padding(BTN_CARD),
-            );
-        }
-        TodoStatus::InProgress => {
-            actions = actions.push(
-                button(text("完成").size(FONT_BODY))
-                    .on_press(Message::FinishTodo(todo.id))
-                    .style(success_button)
-                    .padding(BTN_CARD),
-            );
-        }
-        TodoStatus::Done => {}
-    }
-
-    actions
-        .push(
-            button(text("删除").size(FONT_BODY))
-                .on_press(Message::DeleteTodo(todo.id))
-                .style(button::danger)
-                .padding(BTN_CARD),
-        )
-        .into()
 }
 
 /// "完成"按钮样式：成功绿，悬停时加深。
@@ -2149,7 +2271,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
 
-    // 底部操作行：保存 / 取消（与只读卡片的「编辑」按钮位置对称；单一来源 validate 模块）
+    // 底部操作行：保存 / 取消（单一来源 validate 模块）
     let issues = validate::todo_form_issues(
         &edit.title,
         &edit.due.parsed,
@@ -2172,9 +2294,9 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     ]
     .align_y(Alignment::Center);
 
-    container(column![form, actions, time_meta_rows(todo, app)].spacing(SPACE_M))
+    container(column![form, actions, editor_time_line(todo, app)].spacing(SPACE_M))
         .width(Length::Fill)
-        .padding(12)
+        .padding(PADDING_CARD)
         .style(editor_card_style)
         .into()
 }
@@ -2207,19 +2329,6 @@ fn type_choices(app: &App) -> Vec<TypeChoice> {
     std::iter::once(TypeChoice::none())
         .chain(app.types.iter().map(TypeChoice::of))
         .collect()
-}
-
-/// 任务归属的只读展示行：项目名（未归属显示"无项目"）。
-/// 项目归属只能在编辑模式下修改（R15）。
-fn project_row_readonly<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
-    let (name, color) = match todo
-        .project_id
-        .and_then(|id| app.projects.iter().find(|p| p.id == id))
-    {
-        Some(project) => (project.name.as_str(), sem(app).muted),
-        None => ("无项目", sem(app).muted),
-    };
-    time_row(app, "项目", name.into(), color)
 }
 
 /// pick_list 的选项包装：`id = None` 表示"无项目"（解除归属）。
@@ -2298,91 +2407,6 @@ impl std::fmt::Display for TypeChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.label)
     }
-}
-
-/// 时间元信息：截止时间 + 创建 / 开始 / 结束（年月日粒度）；进行中附已耗时，已完成附总耗时。
-/// （不含项目行：普通模式由 `project_row_readonly` 展示，编辑模式用下拉。）
-fn time_meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
-    let mut meta = column![].spacing(SPACE_XS);
-    let s = sem(app);
-
-    // 截止时间：已逾期且未完成的任务标红提示
-    if let Some(due) = todo.due_at {
-        let overdue = todo.status() != TodoStatus::Done && due < app.now;
-        meta = meta.push(time_row(
-            app,
-            "截止时间",
-            format_date(due),
-            if overdue { s.error } else { s.muted },
-        ));
-    }
-
-    meta = meta.push(time_row(
-        app,
-        "创建时间",
-        format_date(todo.created_at),
-        s.muted,
-    ));
-
-    if todo.status() == TodoStatus::InProgress {
-        let elapsed = todo
-            .duration(app.now)
-            .map(format_duration)
-            .unwrap_or_else(|| "—".into());
-        meta = meta.push(time_row(app, "已耗时", elapsed, s.blue));
-    }
-
-    meta = meta.push(time_row(
-        app,
-        "结束时间",
-        todo.finished_at
-            .map(format_date)
-            .unwrap_or_else(|| "—".into()),
-        s.muted,
-    ));
-
-    if todo.status() == TodoStatus::Done {
-        let total = todo
-            .duration(app.now)
-            .map(format_duration)
-            .unwrap_or_else(|| "—".into());
-        meta = meta.push(time_row(app, "总耗时", total, s.done));
-    }
-
-    meta.into()
-}
-
-/// 任务类型的只读展示行：类型名（灰字）。未设置类型时返回 `None`——
-/// 类型被删除后任务"默认为普通任务，不对外显示"（区别于项目行恒显示"无项目"）。
-fn type_row_readonly<'a>(todo: &'a Todo, app: &'a App) -> Option<Element<'a, Message>> {
-    let name = todo
-        .type_id
-        .and_then(|id| app.types.iter().find(|t| t.id == id))
-        .map(|r#type| r#type.name.as_str())?;
-    Some(time_row(app, "类型", name.into(), sem(app).muted))
-}
-
-/// 普通模式的任务元信息：归属只读行 + 类型只读行（可选）+ 时间行。
-fn meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
-    let mut meta = column![project_row_readonly(todo, app)].spacing(SPACE_XS);
-    if let Some(type_row) = type_row_readonly(todo, app) {
-        meta = meta.push(type_row);
-    }
-    meta = meta.push(time_meta_rows(todo, app));
-    meta.into()
-}
-
-/// 带固定宽度标签的一行时间信息。
-fn time_row<'a>(app: &'a App, label: &'a str, value: String, color: Color) -> Element<'a, Message> {
-    row![
-        text(label)
-            .size(FONT_BODY)
-            .color(sem(app).muted)
-            .width(Length::Fixed(LABEL_WIDTH)),
-        text(value).size(FONT_BODY).color(color),
-    ]
-    .spacing(SPACE_S)
-    .into()
 }
 
 /// 日期格式化（卡片 / 归档时间字段）：UTC 存储、本地时区显示，**年月日粒度**（不显示时分秒）。
@@ -2666,6 +2690,23 @@ mod tests {
             start: ParsedField::prefilled(Some(dt(1_699_000_000))),
             end: ParsedField::prefilled(Some(dt(1_700_200_000))),
         });
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_bare_todo_card() {
+        // 「四无」卡片（无项目/类型/截止/耗时）：meta_line 整行省略路径
+        let mut app = sample_app();
+        let todo = Todo::new_full(
+            "纯标题".into(),
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            app.now,
+        );
+        app.todos.push(todo);
         renders(&app);
     }
 

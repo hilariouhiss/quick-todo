@@ -22,7 +22,9 @@ pub(crate) const FONT_TITLE: f32 = 26.0;
 /// 字号：弹窗标题
 pub(crate) const FONT_DIALOG_TITLE: f32 = 20.0;
 /// 字号：任务卡片标题
-pub(crate) const FONT_CARD_TITLE: f32 = 16.0;
+pub(crate) const FONT_CARD_TITLE: f32 = 14.0;
+/// 字号：图标按钮字形（Material Symbols，见 `ICON_FONT`）
+pub(crate) const FONT_ICON: f32 = 16.0;
 /// 字号：任务区标题行 / 分区标题 / 弹窗操作按钮
 pub(crate) const FONT_HEADER: f32 = 14.0;
 /// 字号：正文 / 按钮 / 芯片
@@ -92,11 +94,20 @@ pub(crate) const BTN_CARD: iced::Padding = iced::Padding {
     bottom: 6.0,
     left: 14.0,
 };
+/// 按钮规格：图标操作按钮（卡片头部，小方角）[4, 6]
+pub(crate) const BTN_ICON: iced::Padding = iced::Padding {
+    top: 4.0,
+    right: 6.0,
+    bottom: 4.0,
+    left: 6.0,
+};
 
 /// 容器：窗口内容边距
 pub(crate) const PADDING_PAGE: f32 = 24.0;
 /// 容器：分组容器 / 卡片内边距
 pub(crate) const PADDING_PANEL: f32 = 12.0;
+/// 容器：任务卡片内边距（高密度卡片，只读与编辑模式共用）
+pub(crate) const PADDING_CARD: f32 = 8.0;
 /// 容器：弹窗卡片内边距
 pub(crate) const PADDING_DIALOG: f32 = 20.0;
 /// 容器：三弹窗统一宽度
@@ -133,3 +144,25 @@ pub(crate) const TYPE_DIALOG_NAME_ID: iced::widget::Id =
 
 /// 类型栏内联编辑名称输入框的 widget Id（进入编辑态时聚焦用）
 pub(crate) const TYPE_EDIT_NAME_ID: iced::widget::Id = iced::widget::Id::new("edit-type-name");
+
+/// 图标字体：Material Symbols Outlined（`assets/fonts/`，OFL 许可，
+/// 经 `iced::font::load` 加载；子集化仅含本项目用到的 8 个字形，约 2.3KB）。
+pub(crate) const ICON_FONT: iced::Font = iced::Font::with_name("Material Symbols Outlined");
+
+// 图标码位（Material Symbols 2.962 codepoints 表，注释字形名）：
+/// 开始（play_arrow U+E037）
+pub(crate) const ICON_PLAY: char = '\u{e037}';
+/// 完成（check U+E668）
+pub(crate) const ICON_CHECK: char = '\u{e668}';
+/// 删除（delete U+E92E）
+pub(crate) const ICON_DELETE: char = '\u{e92e}';
+/// 编辑（edit U+F097）
+pub(crate) const ICON_EDIT: char = '\u{f097}';
+/// 项目（folder U+E2C7）
+pub(crate) const ICON_PROJECT: char = '\u{e2c7}';
+/// 类型（sell U+F05B）
+pub(crate) const ICON_TYPE: char = '\u{f05b}';
+/// 截止时间（schedule U+EFD6）
+pub(crate) const ICON_DUE: char = '\u{efd6}';
+/// 耗时（timer U+E425）
+pub(crate) const ICON_DURATION: char = '\u{e425}';

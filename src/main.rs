@@ -53,6 +53,13 @@ fn boot() -> (App, Task<Message>) {
             // 初始系统主题（深色？）：供「跟随系统」模式显式映射
             iced::system::theme()
                 .map(|mode| Message::SystemThemeChanged(mode == iced::theme::Mode::Dark)),
+            // 图标字体（Material Symbols Outlined，编译期嵌入 assets/fonts/）：
+            // iced 0.14 的 font::Error 为空枚举、加载失败不可观测（损坏字节静默表现为豆腐块），
+            // 故仅作完成信号；失败缓解 = dev-time 校验（体积 / 家族名）+ 手动视觉验证
+            iced::font::load(
+                include_bytes!("../assets/fonts/MaterialSymbolsOutlined.ttf").as_slice(),
+            )
+            .map(|_| Message::FontLoaded),
         ]),
     )
 }

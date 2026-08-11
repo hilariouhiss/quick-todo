@@ -13,7 +13,7 @@ description: Quick Todo 桌面待办应用 —— Rust + iced 0.14（Elm 架构�
 一个使用 [Iced](https://iced.rs) 0.14 开发的待办清单（Todos）桌面应用，核心特性：
 
 - 添加 / 开始 / 完成 / 删除任务，每个任务记录**创建 / 开始 / 结束**三个时间点，可带可选**描述**
-- 任务卡片默认**只读**展示全部属性；点击「编辑」进入编辑模式（即"当前任务"），可修改标题 / 描述 / 项目 / 类型 / 截止时间
+- 任务卡片**高密度只读**展示：标题 + 优先级徽章 + 头部图标操作区（▶ 开始 / ✓ 完成 / ✕ 删除 / ✎ 编辑，tooltip 提示，编辑入口在头部）+ 元信息**单行横排**（图标 + 值：项目 / 类型 / 截止 / 结束 / 耗时，无值不占位）；**无状态徽章**（双列位置已表达）与**创建时间行**（已移除）；点击 ✎ 进入编辑模式（即"当前任务"），可修改标题 / 描述 / 项目 / 类型 / 截止时间；图标字体 = Material Symbols Outlined（`assets/fonts/`，`include_bytes!` 嵌入 + `iced::font::load` 加载）
 - 项目以**单行横向滚动芯片**展示在任务列表上方（圆点 + 名称 + 计数，点击筛选，「全部」恒最前，选中主色高亮）；选中后右端出现「编辑 / 删除」，编辑经项目栏下方展开的**全宽编辑面板**（纯 UI 状态，不持久化）
 - 项目通过标题栏**分体按钮**「＋ 添加任务 ▾」下拉菜单中的「＋ 添加项目」**弹窗**创建（名称必填），可带可选**起止时间**（芯片悬停 tooltip 展示，编辑面板可改）；**任务弹窗内可快速新建项目**（复用新建项目弹窗，创建后自动选中）
 - 任务可带可选**类型**（内建 6 种种子：工作 / 学习 / 生活 / 运动 / 健康 / 娱乐，与自定义完全同权可删；删除后其下任务类型置空）；**类型单行栏**位于项目栏下方（芯片点击筛选，与项目筛选 AND 叠加），类型栏选中时「编辑 / 删除」，创建经标题栏下拉菜单「＋ 添加类型」弹窗 / 任务弹窗内快速新建
@@ -54,11 +54,13 @@ src/
 ├── stats.rs    统计计算：周/月/年/项目桶 + 汇总（纯函数，无 IO）
 ├── validate.rs 表单校验单一来源（TodoFormIssues / ProjectFormIssues 纯函数，view 与 update 共用）
 ├── update.rs   Message 枚举 + update 纯函数（状态流转、校验调用、副作用派发）
-├── view.rs     视图：标题栏（分体按钮 + 下拉菜单）+ 项目 / 类型单行栏（横向滚动芯片）+ 编辑面板 + 任务区（任务卡片/编辑模式、时间元信息）+ 弹窗（任务/项目/类型/归档/统计）+ 统计图表 canvas + 底部 footer（主题指示器 + 统计文本横条）+ 表单行共享组件（project_picker_row / type_picker_row / priority_row / due_row）
+├── view.rs     视图：标题栏（分体按钮 + 下拉菜单）+ 项目 / 类型单行栏（横向滚动芯片）+ 编辑面板 + 任务区（高密度卡片：图标操作区 + meta_line 单行元信息）/ 编辑模式 + 弹窗（任务/项目/类型/归档/统计）+ 统计图表 canvas + 底部 footer（主题指示器 + 统计文本横条）+ 表单行共享组件（project_picker_row / type_picker_row / priority_row / due_row）+ 图标辅助（icon_text / icon_action / meta_line）
 ├── view/
 │   ├── theme.rs   主题调色板（浅「晴空」/ 深「夜航」）+ 语义色双板 SemColors + 取板函数 + 对比度测试
-│   └── tokens.rs  设计令牌（字号/间距/圆角/按钮规格/容器宽度）+ 聚焦 widget Id
+│   └── tokens.rs  设计令牌（字号/间距/圆角/按钮规格/容器宽度）+ 聚焦 widget Id + 图标字体与码位（ICON_FONT / ICON_*）
 └── storage.rs  持久化：SQLite（quick-todo.db，含 types 表与内建种子）+ settings.json（原子写），按 Op 增量写盘
+assets/
+└── fonts/MaterialSymbolsOutlined.ttf   图标字体（OFL，子集化 8 字形，include_bytes! 嵌入）
 docs/
 └── 需求与概要设计.md     需求与概要设计文档 —— 需求 R1-R27 + 非功能 N1-N7、架构图、验收标准，改行为前必读
 ```
@@ -83,7 +85,7 @@ docs/
 9. **非法状态流转静默拒绝**：仅 Pending 可开始、仅 InProgress 可完成，其他情况不产生任何副作用。
 10. **错误不崩溃**：数据文件缺失视为空数据（db 缺失时启动加载自动建库 + 种子）；损坏数据库 / settings.json 返回错误并显示在 UI（`app.error`），绝不 panic。
 11. **UI 文案与代码注释使用中文**；模块级 `//!` + 公开项 `///` 文档注释是标配。
-12. **卡片默认只读，修改须进编辑模式**：主界面任务卡片全部属性只读展示（项目归属、类型也是只读文字，无 `AssignProject` / `AssignType` 消息——归属 / 类型只能经编辑模式保存）；点击「编辑」进入该卡片的编辑模式（即"当前任务"，`App.todo_edit`），可改标题 / 描述 / 项目 / 类型 / 截止时间，保存校验同弹窗；**时间字段（创建 / 开始 / 结束）永不直接编辑**（自动记录，状态由它们推导）；切换编辑其他卡片时未保存修改被丢弃。
+12. **卡片默认只读，修改须进编辑模式**：主界面任务卡片高密度只读展示（标题 + 优先级徽章 + 头部图标操作区（▶/✓/✕/✎，tooltip 提示）+ 元信息单行横排 `meta_line`；**无状态徽章文字**——双列位置已表达状态；无创建时间行、结束时间仅已完成显示；项目归属、类型也是只读文字，无 `AssignProject` / `AssignType` 消息——归属 / 类型只能经编辑模式保存）；点击头部 ✎ 进入该卡片的编辑模式（即"当前任务"，`App.todo_edit`），可改标题 / 描述 / 项目 / 类型 / 截止时间，保存校验同弹窗；**时间字段（创建 / 开始 / 结束）永不直接编辑**（自动记录，状态由它们推导）；切换编辑其他卡片时未保存修改被丢弃。图标统一走 `icon_text` / `icon_action`（Material Symbols Outlined 字体，语义色着染），不使用 emoji 混排。
 13. **双列分组与归档**：任务区双列——左=未开始、右=进行中（各自独立滚动，组内按排序偏好排序、未设置均排最后、稳定排序，`Todo::due_order_key` / `priority_order_key` / `combined_order_key` 为排序键）；已完成任务不进双列，经底部 footer 统计「已完成 x」链接弹窗归档（按 `finished_at` 降序，**不受排序偏好影响**）；分组 / 排序属派生展示，放 view 内部私有函数，update 层不改列表顺序。
 14. **排序偏好、主题模式与优先级**：任务区右上角（统一标题行右端）与项目单行栏最左侧各自独立排序下拉（均无文字标签）（`sort_mode` / `project_sort_mode`，值：优先级 / 截止日期 / 综合=优先级优先同级按截止）；「综合」的截止键：任务=`due_at`、项目=`finished_at`（项目结束时间即截止日期）；「全部」芯片恒在项目栏最前；优先级展示：卡片徽章「高/中/低」（高红/中橙/低灰）、项目芯片彩色圆点；`Priority`（低<中<高，不序列化）、`SortMode`（库 / settings.json 存英文变体名，缺省 `Combined`）与 `ThemeMode`（**System / Light / Dark，settings.json 必填键**——旧文件缺键解析失败红字提示不迁移，缺省 `System`）——`SortMode` / `ThemeMode` 派生 `Serialize/Deserialize/Default`；`.theme()` 闭包**恒返回 `Some(Theme::custom(…))`**（两套自定义调色板）：System → 按 `App.is_dark()`（`App.system_dark` 经 `iced::system::theme_changes` 订阅实时更新，不持久化）显式映射，Light / Dark → 固定板，view 层语义色取板共用同一 `is_dark` 判定（iced 原生 `None` 跟随在手动 → Auto 切换时窗口边框 / 内容主题分裂，故不用）。
 15. **表单校验单一来源（validate.rs）**：任务表单（弹窗 / 卡片编辑）、项目表单（弹窗 / 编辑面板）与类型表单（弹窗 / 编辑面板）的校验规则只有一份实现（`TodoFormIssues` / `ProjectFormIssues` / `TypeFormIssues` 纯函数）——view 层据此派生按钮禁用与红字提示（`can_submit_*`），update 层提交时据此防御性拒绝（`todo_form_values` / `project_form_values`）。语义约定：`can_submit_todo` **不含** `missing_project` / `missing_type`（项目 / 类型被删后按钮仍可点、提交被拒，与历史行为逐位一致）；重名校验排除自身经 `exclude_id` 参数；消息级守卫（`DialogProjectChanged` / `EditProjectChanged` 用 `project_exists`，`DialogTypeChanged` / `EditTypeChanged` 用 `type_exists`）不属表单校验。表单时间输入统一 `ParsedField` 值对象（`input` 原文 + `parsed` 实时解析结果成对缓存；`changed` / `prefilled` / `new` 三种构造）。

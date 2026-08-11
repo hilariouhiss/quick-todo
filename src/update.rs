@@ -13,7 +13,7 @@ use crate::model::{
     TodoEdit, TodoStatus, format_due, parse_datetime,
 };
 use crate::storage::{self, Op, Store};
-use crate::view::{DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID, PROJECT_EDIT_NAME_ID};
+use crate::view::tokens::{DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID, PROJECT_EDIT_NAME_ID};
 
 /// 应用内所有可触发的消息。
 #[derive(Debug, Clone)]

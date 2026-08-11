@@ -14,7 +14,8 @@ use iced::{Size, Subscription, Task, Theme};
 
 use model::App;
 use update::{Message, update};
-use view::{DARK_PALETTE, LIGHT_PALETTE, view};
+use view::theme::{DARK_PALETTE, LIGHT_PALETTE};
+use view::view;
 
 pub fn main() -> iced::Result {
     iced::application(boot, update, view)

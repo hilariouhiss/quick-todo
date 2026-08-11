@@ -314,6 +314,7 @@ impl ParsedField {
     }
 }
 
+// `Result` 未实现 `Default`（std 设计使然），故 ParsedField 无法派生 Default，手动实现为空表单态
 impl Default for ParsedField {
     fn default() -> Self {
         Self::new()
@@ -323,7 +324,7 @@ impl Default for ParsedField {
 /// 弹窗添加任务的表单状态（纯内存，不持久化；`App.add_dialog = None` 表示弹窗关闭）。
 /// 所属项目的快速新建入口见 `OpenQuickProjectDialog`：弹出与标题栏相同的新建项目弹窗，
 /// 创建成功后自动选中新项目（`project_id`），任务弹窗本身不持有快速新建状态。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AddDialog {
     /// 标题输入
     pub title: String,
@@ -337,20 +338,8 @@ pub struct AddDialog {
     pub due: ParsedField,
 }
 
-impl Default for AddDialog {
-    fn default() -> Self {
-        Self {
-            title: String::new(),
-            description: String::new(),
-            priority: None,
-            project_id: None,
-            due: ParsedField::new(),
-        }
-    }
-}
-
 /// 弹窗添加项目的表单状态（纯内存，不持久化；`App.project_dialog = None` 表示弹窗关闭）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProjectDialog {
     /// 名称输入
     pub name: String,
@@ -360,17 +349,6 @@ pub struct ProjectDialog {
     pub start: ParsedField,
     /// 结束时间输入框的原文 + 实时解析结果
     pub end: ParsedField,
-}
-
-impl Default for ProjectDialog {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            priority: None,
-            start: ParsedField::new(),
-            end: ParsedField::new(),
-        }
-    }
 }
 
 /// 项目编辑面板的表单状态（纯内存，不持久化；`App.project_edit = None` 表示未处于编辑态）。

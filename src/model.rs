@@ -161,8 +161,9 @@ pub struct Todo {
 
 impl Todo {
     /// 创建一条**仅标题**的新任务（无描述 / 无优先级 / 无项目 / 无截止时间；
-    /// 等价于 `new_full(title, "", None, None, None, now)`，**仅测试便捷使用**——
-    /// 生产提交路径恒走 `new_full`，无单独分支）。
+    /// 等价于 `new_full(title, "", None, None, None, now)`）。**仅测试便捷使用**——
+    /// 生产提交路径恒走 `new_full`，无单独分支。
+    #[cfg(test)]
     pub fn new(title: String, now: DateTime<Utc>) -> Self {
         Self::new_full(title, String::new(), None, None, None, now)
     }
@@ -250,8 +251,9 @@ pub struct Project {
 
 impl Project {
     /// 创建一条新项目（无优先级 / 无起止时间，此时即记录创建时间；
-    /// 等价于 `new_full(name, None, None, None, now)`，**仅测试便捷使用**——
-    /// 生产提交路径恒走 `new_full`，无单独分支）。
+    /// 等价于 `new_full(name, None, None, None, now)`）。**仅测试便捷使用**——
+    /// 生产提交路径恒走 `new_full`，无单独分支。
+    #[cfg(test)]
     pub fn new(name: String, now: DateTime<Utc>) -> Self {
         Self::new_full(name, None, None, None, now)
     }

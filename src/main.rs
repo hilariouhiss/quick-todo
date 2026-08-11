@@ -7,6 +7,7 @@
 mod model;
 mod storage;
 mod update;
+mod validate;
 mod view;
 
 use iced::futures::{SinkExt, channel::mpsc};

@@ -13,6 +13,7 @@ use crate::model::{
     TodoEdit, TodoStatus, format_due, parse_datetime,
 };
 use crate::storage::{self, Op, Store};
+use crate::validate;
 use crate::view::tokens::{DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID, PROJECT_EDIT_NAME_ID};
 
 /// 应用内所有可触发的消息。
@@ -236,32 +237,20 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
             let restore = |app: &mut App| app.project_dialog = Some(dialog.clone());
 
-            let name = dialog.name.trim().to_owned();
-            if name.is_empty() || app.projects.iter().any(|p| p.name == name) {
-                restore(app);
-                return Task::none();
-            }
-            let started_at = match dialog.start_parsed {
-                Ok(time) => time,
+            // 校验单一来源（validate 模块）：空白名 / 重名 / 时间非法 / 开始≥结束
+            let (name, started_at, finished_at) = match validate::project_form_values(
+                &dialog.name,
+                None,
+                &dialog.start_parsed,
+                &dialog.end_parsed,
+                &app.projects,
+            ) {
+                Ok(values) => values,
                 Err(_) => {
                     restore(app);
                     return Task::none();
                 }
             };
-            let finished_at = match dialog.end_parsed {
-                Ok(time) => time,
-                Err(_) => {
-                    restore(app);
-                    return Task::none();
-                }
-            };
-            // 起止时间同时设置时必须满足：开始早于结束
-            if let (Some(start), Some(finish)) = (started_at, finished_at)
-                && start >= finish
-            {
-                restore(app);
-                return Task::none();
-            }
 
             // 校验通过：创建项目（含优先级与起止时间、时间取自 app.now）并关闭弹窗
             let project =
@@ -352,37 +341,20 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
             let restore = |app: &mut App| app.project_edit = Some(edit.clone());
 
-            let name = edit.name.trim().to_owned();
-            if name.is_empty()
-                || app
-                    .projects
-                    .iter()
-                    .any(|p| p.id != edit.project_id && p.name == name)
-            {
-                restore(app);
-                return Task::none();
-            }
-            let started_at = match edit.start_parsed {
-                Ok(time) => time,
+            // 校验单一来源（validate 模块）：空白名 / 重名（排除自身）/ 时间非法 / 开始≥结束
+            let (name, started_at, finished_at) = match validate::project_form_values(
+                &edit.name,
+                Some(edit.project_id),
+                &edit.start_parsed,
+                &edit.end_parsed,
+                &app.projects,
+            ) {
+                Ok(values) => values,
                 Err(_) => {
                     restore(app);
                     return Task::none();
                 }
             };
-            let finished_at = match edit.end_parsed {
-                Ok(time) => time,
-                Err(_) => {
-                    restore(app);
-                    return Task::none();
-                }
-            };
-            // 起止时间同时设置时必须满足：开始早于结束
-            if let (Some(start), Some(finish)) = (started_at, finished_at)
-                && start >= finish
-            {
-                restore(app);
-                return Task::none();
-            }
 
             if let Some(project) = app.projects.iter_mut().find(|p| p.id == edit.project_id) {
                 // 校验通过：就地更新名称、优先级与起止时间并退出编辑态
@@ -482,7 +454,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::DialogProjectChanged(project_id) => {
             // 防御：项目必须存在（已被删除的项目不可再被选中）
-            if !project_id.is_none_or(|id| app.projects.iter().any(|p| p.id == id)) {
+            if !validate::project_exists(&app.projects, project_id) {
                 return Task::none();
             }
             if let Some(dialog) = &mut app.add_dialog {
@@ -531,25 +503,19 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
             let restore = |app: &mut App| app.add_dialog = Some(dialog.clone());
 
-            let title = dialog.title.trim().to_owned();
-            if title.is_empty() {
-                restore(app);
-                return Task::none();
-            }
-            let due_at = match dialog.due_parsed {
-                Ok(due) => due,
+            // 校验单一来源（validate 模块）：空白标题 / 时间非法 / 项目不存在
+            let (title, due_at) = match validate::todo_form_values(
+                &dialog.title,
+                &dialog.due_parsed,
+                dialog.project_id,
+                &app.projects,
+            ) {
+                Ok(values) => values,
                 Err(_) => {
                     restore(app);
                     return Task::none();
                 }
             };
-            if !dialog
-                .project_id
-                .is_none_or(|id| app.projects.iter().any(|p| p.id == id))
-            {
-                restore(app);
-                return Task::none();
-            }
 
             // 校验通过：创建任务（插最前、时间取自 app.now）并关闭弹窗
             let description = dialog.description.trim().to_owned();
@@ -609,7 +575,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::EditProjectChanged(project_id) => {
             // 防御：项目必须存在（已被删除的项目不可再被选中）
-            if !project_id.is_none_or(|id| app.projects.iter().any(|p| p.id == id)) {
+            if !validate::project_exists(&app.projects, project_id) {
                 return Task::none();
             }
             if let Some(edit) = &mut app.todo_edit {
@@ -647,25 +613,19 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
             let restore = |app: &mut App| app.todo_edit = Some(edit.clone());
 
-            let title = edit.title.trim().to_owned();
-            if title.is_empty() {
-                restore(app);
-                return Task::none();
-            }
-            let due_at = match edit.due_parsed {
-                Ok(due) => due,
+            // 校验单一来源（validate 模块）：空白标题 / 时间非法 / 项目不存在
+            let (title, due_at) = match validate::todo_form_values(
+                &edit.title,
+                &edit.due_parsed,
+                edit.project_id,
+                &app.projects,
+            ) {
+                Ok(values) => values,
                 Err(_) => {
                     restore(app);
                     return Task::none();
                 }
             };
-            if !edit
-                .project_id
-                .is_none_or(|id| app.projects.iter().any(|p| p.id == id))
-            {
-                restore(app);
-                return Task::none();
-            }
 
             // 校验通过：更新任务（trim 后存储）并退出编辑模式
             let Some(todo) = app.todos.iter_mut().find(|todo| todo.id == edit.todo_id) else {

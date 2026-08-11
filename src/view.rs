@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 use crate::model::{App, Priority, Project, QuickDue, SortMode, Todo, TodoStatus};
 use crate::update::Message;
+use crate::validate;
 use theme::{SemColors, extended, sem, sem_colors};
 use tokens::*;
 
@@ -398,8 +399,14 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
 
-    // 按钮行：标题为空或截止时间非法时"创建"禁用
-    let can_submit = !dialog.title.trim().is_empty() && dialog.due_parsed.is_ok();
+    // 按钮行：标题为空或截止时间非法时"创建"禁用（单一来源 validate 模块）
+    let issues = validate::todo_form_issues(
+        &dialog.title,
+        &dialog.due_parsed,
+        dialog.project_id,
+        &app.projects,
+    );
+    let can_submit = validate::can_submit_todo(&issues);
     let actions = row![
         Space::new().width(Length::Fill),
         button(text("取消").size(FONT_HEADER))
@@ -450,13 +457,14 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         .on_submit(Message::SubmitProjectDialog)
         .padding(10);
 
-    // 派生校验（视图层实时反馈，update 层提交时再防御一次）
-    let name = dialog.name.trim();
-    let name_conflict = !name.is_empty() && app.projects.iter().any(|p| p.name == name);
-    let range_invalid = match (&dialog.start_parsed, &dialog.end_parsed) {
-        (Ok(Some(start)), Ok(Some(finish))) => start >= finish,
-        _ => false,
-    };
+    // 派生校验（单一来源 validate 模块；视图层实时反馈，update 层提交时再防御一次）
+    let issues = validate::project_form_issues(
+        &dialog.name,
+        None,
+        &dialog.start_parsed,
+        &dialog.end_parsed,
+        &app.projects,
+    );
 
     // 表单主体；按需追加红字提示
     let mut form = column![
@@ -479,10 +487,10 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     if let Err(hint) = &dialog.end_parsed {
         form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
-    if name_conflict {
+    if issues.name_conflict {
         form = form.push(text("项目名已存在").size(FONT_SMALL).color(s.error));
     }
-    if range_invalid {
+    if issues.range_invalid {
         form = form.push(
             text("开始时间必须早于结束时间")
                 .size(FONT_SMALL)
@@ -491,11 +499,7 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     }
 
     // 按钮行：名称为空 / 重名 / 时间非法 / 开始≥结束 时"创建"禁用
-    let can_submit = !name.is_empty()
-        && !name_conflict
-        && dialog.start_parsed.is_ok()
-        && dialog.end_parsed.is_ok()
-        && !range_invalid;
+    let can_submit = validate::can_submit_project(&issues);
     let actions = row![
         Space::new().width(Length::Fill),
         button(text("取消").size(FONT_HEADER))
@@ -820,17 +824,14 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
         .expect("编辑面板仅在 project_edit 命中时渲染");
     let s = sem(app);
 
-    // 派生校验（视图实时反馈，update 层保存时再防御一次）
-    let name = edit.name.trim();
-    let name_conflict = !name.is_empty()
-        && app
-            .projects
-            .iter()
-            .any(|p| p.id != edit.project_id && p.name == name);
-    let range_invalid = match (&edit.start_parsed, &edit.end_parsed) {
-        (Ok(Some(start)), Ok(Some(finish))) => start >= finish,
-        _ => false,
-    };
+    // 派生校验（单一来源 validate 模块；视图实时反馈，update 层保存时再防御一次）
+    let issues = validate::project_form_issues(
+        &edit.name,
+        Some(edit.project_id),
+        &edit.start_parsed,
+        &edit.end_parsed,
+        &app.projects,
+    );
 
     let mut form = column![
         row![
@@ -879,18 +880,14 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
     if let Err(hint) = &edit.end_parsed {
         form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
-    if name_conflict {
+    if issues.name_conflict {
         form = form.push(text("项目名已存在").size(FONT_SMALL).color(s.error));
     }
-    if range_invalid {
+    if issues.range_invalid {
         form = form.push(text("开始须早于结束").size(FONT_SMALL).color(s.error));
     }
 
-    let can_submit = !name.is_empty()
-        && !name_conflict
-        && edit.start_parsed.is_ok()
-        && edit.end_parsed.is_ok()
-        && !range_invalid;
+    let can_submit = validate::can_submit_project(&issues);
 
     let actions = row![
         Space::new().width(Length::Fill),
@@ -1414,8 +1411,14 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
     }
 
-    // 底部操作行：保存 / 取消（与只读卡片的「编辑」按钮位置对称）
-    let can_submit = !edit.title.trim().is_empty() && edit.due_parsed.is_ok();
+    // 底部操作行：保存 / 取消（与只读卡片的「编辑」按钮位置对称；单一来源 validate 模块）
+    let issues = validate::todo_form_issues(
+        &edit.title,
+        &edit.due_parsed,
+        edit.project_id,
+        &app.projects,
+    );
+    let can_submit = validate::can_submit_todo(&issues);
     let actions = row![
         Space::new().width(Length::Fill),
         button(text("保存").size(FONT_BODY))

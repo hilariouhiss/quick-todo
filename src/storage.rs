@@ -1,7 +1,8 @@
 //! 持久化：任务 / 项目存 SQLite 单文件（quick-todo.db），排序偏好存独立 JSON（settings.json）。
 //!
 //! 两个文件都放在**可执行文件同目录**（`current_exe()` 父目录，失败退化当前目录）。
-//! 文件缺失视为空数据；损坏文件返回错误（由 UI 提示，不崩溃）。
+//! 文件缺失视为空数据——**db 缺失时 load 阶段即自动建库并插入内建类型种子**（首次启动
+//! 即可选择内建类型，见 `open_db`）；损坏文件返回错误（由 UI 提示，不崩溃）。
 //!
 //! 写盘策略（增量写）：每个数据变更由 `update` 层派发一个 `Op`（携带完整行状态），
 //! `apply` 在单事务内执行对应 SQL；排序偏好整文件覆写 `settings.json`（无读-改-写）。
@@ -88,7 +89,8 @@ pub fn settings_file() -> PathBuf {
     data_dir().join("settings.json")
 }
 
-/// 从默认位置加载任务 / 项目 / 类型 / 排序偏好（DB 缺失视为空数据，settings 缺失取默认「综合」）。
+/// 从默认位置加载任务 / 项目 / 类型 / 排序偏好（DB 缺失时自动建库并插入内建类型种子，
+/// 任务 / 项目视为空数据；settings 缺失取默认「综合」）。
 pub async fn load() -> Result<Store, String> {
     let (todos, projects, types) = load_db_from(&db_file()).await?;
     let settings = load_settings_from(&settings_file()).await?;
@@ -421,10 +423,8 @@ fn update_type(tx: &rusqlite::Transaction<'_>, r#type: &TodoType) -> Result<(), 
 }
 
 fn load_db_sync(path: &Path) -> Result<LoadedData, String> {
-    if !path.exists() {
-        // 缺失视为空数据（不建表，首次写入时自动创建）
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
-    }
+    // 文件缺失：open_db 自动建库 + 插入内建类型种子（幂等），任务 / 项目仍为空数据；
+    // 统一走同一路径，避免「首次写盘前任务弹窗无内建类型」的时序缺陷
     let conn = open_db(path)?;
 
     let mut todos = Vec::new();
@@ -869,13 +869,17 @@ mod tests {
         let path = temp_path("missing.db");
         let _ = std::fs::remove_file(&path).ok();
 
-        // 缺失 → 空数据（含类型列表）
+        // 缺失 → 空任务 / 空项目 + 内建类型种子已就绪（load 阶段自动建库插种子，
+        // 修复：首次打开任务弹窗即可选择内建类型，无需等待首次写盘）
         let (todos, projects, types) = load_db_from(&path).await.unwrap();
         assert!(todos.is_empty());
         assert!(projects.is_empty());
-        assert!(types.is_empty());
+        assert_eq!(types.len(), 6); // 种子已插入
+        assert!(path.exists()); // db 文件已创建
+        let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["工作", "学习", "生活", "运动", "健康", "娱乐"]); // 顺序稳定
 
-        // 首次写入自动建表成功（种子随表创建插入）
+        // 先 load（建库）后写盘仍成功（种子幂等，不重复插入）
         let todo = Todo::new("新任务".into(), dt());
         apply_to(path.clone(), Op::InsertTodo(todo.clone()))
             .await
@@ -883,7 +887,7 @@ mod tests {
         let (todos, _, types) = load_db_from(&path).await.unwrap();
         assert_eq!(todos.len(), 1);
         assert_eq!(todos[0].title, "新任务");
-        assert_eq!(types.len(), 6); // 内建类型种子已插入
+        assert_eq!(types.len(), 6); // 种子不重复
 
         let _ = std::fs::remove_file(&path).ok();
     }

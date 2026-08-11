@@ -8,7 +8,7 @@
 //! 视觉规范统一由 `view/tokens.rs`「设计令牌」常量控制（字号 / 间距 / 圆角 / 按钮规格），
 //! 颜色来自 `view/theme.rs` 调色板 + `extended_palette()` 主题自适应（浅 / 深主题均可读）。
 //! 每个任务一张卡片：标题、状态徽章、操作按钮、只读属性展示（含项目归属），
-//! 以及创建 / 开始 / 结束三个时间点和（实时）耗时；「编辑」按钮在卡片右下角。
+//! 以及创建 / 开始 / 结束三个时间点与耗时（两级粒度，不逐秒跳动）；「编辑」按钮在卡片右下角。
 
 pub(crate) mod theme;
 pub(crate) mod tokens;
@@ -104,7 +104,7 @@ fn priority_picker<'a>(
         Some(PriorityChoice::of(selected)),
         move |choice| on_select(choice.value),
     )
-    .text_size(FONT_BODY)
+    .text_size(FONT_HEADER)
     .padding([SPACE_XS, SPACE_M])
     .style(pick_list_style)
     .width(Length::Fill)
@@ -131,7 +131,7 @@ fn project_picker_row<'a>(
             move |choice| on_select(choice.id),
         )
         .placeholder("无项目")
-        .text_size(FONT_BODY)
+        .text_size(FONT_HEADER)
         .padding([SPACE_XS, SPACE_M])
         .style(pick_list_style)
         .width(Length::Fill),
@@ -182,6 +182,7 @@ fn due_row<'a>(
             .color(sem(app).muted)
             .width(Length::Fixed(LABEL_WIDTH)),
         text_input("2026-01-31 或 2026-01-31 18:30", input)
+            .style(text_input_style)
             .on_input(on_input)
             .on_submit(on_submit)
             .padding(padding)
@@ -189,7 +190,7 @@ fn due_row<'a>(
         Space::new().width(SPACE_S),
         PickList::new(&QUICK_DUE_OPTIONS[..], Option::<QuickDue>::None, on_quick)
             .placeholder("快捷时间")
-            .text_size(FONT_BODY)
+            .text_size(FONT_HEADER)
             .padding([SPACE_XS, SPACE_M])
             .style(pick_list_style),
     ]
@@ -229,6 +230,36 @@ fn pick_list_style(theme: &iced::Theme, status: pick_list::Status) -> pick_list:
             background: background.strong.color.into(),
             ..base
         },
+    }
+}
+
+/// 文本输入框样式：与下拉选择器同款——弱色底 + 卡片圆角 + 主题描边；聚焦时主色描边（1.5px）。
+/// placeholder / 正文 / 选中文本色均取自主题派生，深浅主题自适应。
+fn text_input_style(theme: &iced::Theme, status: text_input::Status) -> text_input::Style {
+    let palette = theme.extended_palette();
+    let muted = sem_colors(palette.is_dark).muted;
+    let base = text_input::Style {
+        background: palette.background.weak.color.into(),
+        border: Border {
+            color: palette.background.strong.color,
+            width: 1.0,
+            radius: RADIUS_CARD.into(),
+        },
+        icon: muted,
+        placeholder: muted,
+        value: palette.background.base.text,
+        selection: palette.primary.weak.color,
+    };
+    match status {
+        text_input::Status::Focused { .. } => text_input::Style {
+            border: Border {
+                color: palette.primary.base.color,
+                width: 1.5,
+                radius: RADIUS_CARD.into(),
+            },
+            ..base
+        },
+        _ => base,
     }
 }
 
@@ -407,12 +438,14 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     // 标题（必填）：回车提交
     let title_input = text_input("任务标题（必填）", &dialog.title)
         .id(DIALOG_TITLE_ID)
+        .style(text_input_style)
         .on_input(Message::DialogTitleChanged)
         .on_submit(Message::SubmitAddDialog)
         .padding(10);
 
     // 描述（可选）：回车提交
     let description_input = text_input("任务描述（可选）", &dialog.description)
+        .style(text_input_style)
         .on_input(Message::DialogDescriptionChanged)
         .on_submit(Message::SubmitAddDialog)
         .padding(10);
@@ -495,16 +528,19 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     // 名称（必填）：回车提交
     let name_input = text_input("项目名称（必填）", &dialog.name)
         .id(PROJECT_DIALOG_NAME_ID)
+        .style(text_input_style)
         .on_input(Message::ProjectNameChanged)
         .on_submit(Message::SubmitProjectDialog)
         .padding(10);
 
     // 开始 / 结束时间（可选）：回车提交，实时解析校验
     let start_input = text_input("2026-01-31 或 2026-01-31 18:30", &dialog.start.input)
+        .style(text_input_style)
         .on_input(Message::ProjectStartChanged)
         .on_submit(Message::SubmitProjectDialog)
         .padding(10);
     let end_input = text_input("2026-01-31 或 2026-01-31 18:30", &dialog.end.input)
+        .style(text_input_style)
         .on_input(Message::ProjectEndChanged)
         .on_submit(Message::SubmitProjectDialog)
         .padding(10);
@@ -726,7 +762,7 @@ fn dimension_picker<'a>(app: &'a App) -> Element<'a, Message> {
         Message::StatsDimensionChanged,
     )
     .style(pick_list_style)
-    .text_size(FONT_BODY)
+    .text_size(FONT_HEADER)
     .padding([SPACE_XS, SPACE_M])
     .into()
 }
@@ -1011,7 +1047,7 @@ fn done_row<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         .unwrap_or("无项目");
     let finished = todo
         .finished_at
-        .map(format_time)
+        .map(format_date)
         .unwrap_or_else(|| "—".into());
     let total = todo
         .duration(app.now)
@@ -1095,7 +1131,7 @@ fn task_sort_picker(app: &App) -> Element<'_, Message> {
         Some(app.sort_mode),
         Message::SortModeChanged,
     )
-    .text_size(FONT_BODY)
+    .text_size(FONT_HEADER)
     .padding([SPACE_XS, SPACE_M])
     .style(pick_list_style)
     .into()
@@ -1164,7 +1200,7 @@ fn project_bar(app: &App) -> Element<'_, Message> {
             Some(app.project_sort_mode),
             Message::ProjectSortModeChanged,
         )
-        .text_size(FONT_BODY)
+        .text_size(FONT_HEADER)
         .padding([SPACE_XS, SPACE_M])
         .style(pick_list_style),
         text("项目").size(FONT_BODY).font(BOLD),
@@ -1297,6 +1333,7 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
                 text("名称").size(FONT_TINY).color(sem(app).muted),
                 text_input("项目名称", &edit.name)
                     .id(PROJECT_EDIT_NAME_ID)
+                    .style(text_input_style)
                     .on_input(Message::ProjectEditNameChanged)
                     .on_submit(Message::SaveEditProject)
                     .padding(6),
@@ -1506,6 +1543,7 @@ fn labeled_input<'a>(
     column![
         text(label).size(FONT_TINY).color(sem(app).muted),
         text_input(placeholder, value)
+            .style(text_input_style)
             .on_input(on_input)
             .on_submit(Message::SaveEditProject)
             .padding(6),
@@ -1779,6 +1817,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
 
     // 标题（必填）：回车保存
     let title_input = text_input("任务标题（必填）", &edit.title)
+        .style(text_input_style)
         .on_input(Message::EditTitleChanged)
         .on_submit(Message::SaveEditTodo)
         .padding(8)
@@ -1786,6 +1825,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
 
     // 描述（可选）：回车保存
     let description_input = text_input("任务描述（可选）", &edit.description)
+        .style(text_input_style)
         .on_input(Message::EditDescriptionChanged)
         .on_submit(Message::SaveEditTodo)
         .padding(8);
@@ -1935,7 +1975,7 @@ impl std::fmt::Display for ProjectChoice {
     }
 }
 
-/// 时间元信息：截止时间 + 创建 / 开始 / 结束；进行中附实时耗时，已完成附总耗时。
+/// 时间元信息：截止时间 + 创建 / 开始 / 结束（年月日粒度）；进行中附已耗时，已完成附总耗时。
 /// （不含项目行：普通模式由 `project_row_readonly` 展示，编辑模式用下拉。）
 fn time_meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     let mut meta = column![].spacing(SPACE_XS);
@@ -1947,7 +1987,7 @@ fn time_meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         meta = meta.push(time_row(
             app,
             "截止时间",
-            format_time(due),
+            format_date(due),
             if overdue { s.error } else { s.muted },
         ));
     }
@@ -1955,7 +1995,7 @@ fn time_meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     meta = meta.push(time_row(
         app,
         "创建时间",
-        format_time(todo.created_at),
+        format_date(todo.created_at),
         s.muted,
     ));
 
@@ -1964,19 +2004,14 @@ fn time_meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
             .duration(app.now)
             .map(format_duration)
             .unwrap_or_else(|| "—".into());
-        meta = meta.push(time_row(
-            app,
-            "已耗时",
-            format!("{elapsed}（实时）"),
-            s.blue,
-        ));
+        meta = meta.push(time_row(app, "已耗时", elapsed, s.blue));
     }
 
     meta = meta.push(time_row(
         app,
         "结束时间",
         todo.finished_at
-            .map(format_time)
+            .map(format_date)
             .unwrap_or_else(|| "—".into()),
         s.muted,
     ));
@@ -2012,21 +2047,37 @@ fn time_row<'a>(app: &'a App, label: &'a str, value: String, color: Color) -> El
     .into()
 }
 
-/// 时间格式化：UTC 存储、本地时区显示。
-fn format_time(dt: DateTime<Utc>) -> String {
+/// 日期格式化（卡片 / 归档时间字段）：UTC 存储、本地时区显示，**年月日粒度**（不显示时分秒）。
+fn format_date(dt: DateTime<Utc>) -> String {
     dt.with_timezone(&chrono::Local)
-        .format("%Y-%m-%d %H:%M:%S")
+        .format("%Y-%m-%d")
         .to_string()
 }
 
-/// 耗时格式化："X 小时 Y 分 Z 秒" / "Y 分 Z 秒" / "Z 秒"。
+/// 耗时格式化（两级粒度，无秒，不逐秒跳动）：
+/// ≥1 天「X 天 Y 小时」（整小时省略）／<1 天「X 小时 Y 分」（整分省略）／<1 小时「X 分」／<1 分钟「不足 1 分」。
 fn format_duration(d: Duration) -> String {
     let total = d.num_seconds().max(0);
-    let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60);
-    match (hours, minutes) {
-        (0, 0) => format!("{seconds} 秒"),
-        (0, _) => format!("{minutes} 分 {seconds} 秒"),
-        _ => format!("{hours} 小时 {minutes} 分 {seconds} 秒"),
+    if total >= 86_400 {
+        let days = total / 86_400;
+        let hours = (total % 86_400) / 3_600;
+        if hours > 0 {
+            format!("{days} 天 {hours} 小时")
+        } else {
+            format!("{days} 天")
+        }
+    } else if total >= 3_600 {
+        let hours = total / 3_600;
+        let minutes = (total % 3_600) / 60;
+        if minutes > 0 {
+            format!("{hours} 小时 {minutes} 分")
+        } else {
+            format!("{hours} 小时")
+        }
+    } else if total >= 60 {
+        format!("{} 分", total / 60)
+    } else {
+        "不足 1 分".into()
     }
 }
 
@@ -2181,6 +2232,45 @@ mod tests {
         app.show_stats = true;
         app.stats_dimension = StatsDimension::Project;
         renders(&app);
+    }
+
+    /// 耗时两级粒度：各档位切换边界与整档位省略零次单位。
+    #[test]
+    fn format_duration_two_level_granularity() {
+        use chrono::Duration as D;
+        assert_eq!(format_duration(D::seconds(0)), "不足 1 分");
+        assert_eq!(format_duration(D::seconds(59)), "不足 1 分");
+        assert_eq!(format_duration(D::seconds(60)), "1 分");
+        assert_eq!(format_duration(D::seconds(3599)), "59 分");
+        // 整小时：省略零分
+        assert_eq!(format_duration(D::seconds(3600)), "1 小时");
+        assert_eq!(format_duration(D::seconds(3660)), "1 小时 1 分");
+        assert_eq!(format_duration(D::seconds(86399)), "23 小时 59 分");
+        // 整天：省略零小时
+        assert_eq!(format_duration(D::seconds(86400)), "1 天");
+        assert_eq!(format_duration(D::seconds(90000)), "1 天 1 小时");
+        assert_eq!(
+            format_duration(D::seconds(86_400 * 2 + 3_600 * 5)),
+            "2 天 5 小时"
+        );
+        // 负值兜底为 0
+        assert_eq!(format_duration(D::seconds(-30)), "不足 1 分");
+    }
+
+    /// 日期格式化：本地时区年月日，不含时分秒。
+    #[test]
+    fn format_date_local_ymd_without_time() {
+        use chrono::TimeZone;
+        // 选 UTC 正午（UTC-12 ~ +12 均同日，可移植）
+        let noon = Utc.timestamp_opt(1_750_000_000, 0).unwrap();
+        let expected = noon
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(format_date(noon), expected);
+        // 长度固定（YYYY-MM-DD），不含空格（无时分秒）
+        assert_eq!(format_date(noon).len(), 10);
+        assert!(!format_date(noon).contains(' '));
     }
 
     /// 回归：纵柱状图绘图区必须位于画布本地坐标内（历史 bug——误用 `bounds.x/y`

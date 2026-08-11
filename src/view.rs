@@ -1128,8 +1128,8 @@ fn add_menu_card() -> Element<'static, Message> {
 
 // ---------- 底部角落条 ----------
 
-/// 底部 footer：左下角主题指示器 + 右下角统计胶囊；常规流布局固定于窗口内容区底部
-/// （任务列表卡片容器下方，不悬浮、不与滚动内容重叠；仍位于弹窗遮罩之下）。
+/// 底部 footer：主题指示器 + 统计；横条样式（弱色底 + 四边框、无圆角）常规流布局固定于窗口内容区
+/// 底部（任务列表卡片容器下方，不悬浮、不与滚动内容重叠；仍位于弹窗遮罩之下）。
 fn footer(app: &App) -> Element<'_, Message> {
     container(
         row![
@@ -1140,23 +1140,44 @@ fn footer(app: &App) -> Element<'_, Message> {
         .align_y(Alignment::Center),
     )
     .width(Length::Fill)
+    .padding([SPACE_S, SPACE_L])
+    .style(footer_style)
     .into()
 }
 
+/// footer 横条样式：弱色底 + 主题描边（无圆角），与卡片容器区分。
+fn footer_style(theme: &iced::Theme) -> container::Style {
+    let background = theme.extended_palette().background;
+    container::Style {
+        background: Some(Background::Color(background.weak.color)),
+        border: Border {
+            color: background.strong.color,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
 /// 左下角主题指示器：`Theme: Auto/Light/Dark`（无 tooltip），点击循环切换主题模式；
-/// 胶囊外壳（复用项目芯片样式：弱色底 + 描边 + 胶囊圆角 + 悬停加深），与其他组件风格统一。
+/// 文本样式按钮（无胶囊外壳，与统计同属 footer 横条内的文本）。
 fn theme_indicator(app: &App) -> Element<'_, Message> {
     button(text(format!("Theme: {}", app.theme_mode.label())).size(FONT_BODY))
         .on_press(Message::CycleThemeMode)
-        .style(|theme, status| project_chip_style(theme, status, false))
-        .padding(BTN_MEDIUM)
+        .style(button::text)
+        .padding([SPACE_XS, SPACE_M])
         .into()
 }
 
-/// 右下角分体统计：`共 x 项 | 进行中 x | 已完成 x` 单行胶囊（`summary_pill_style` 外壳）；
+/// 右下角统计：`共 x 项 | 未开始 x | 进行中 x | 已完成 x` 单行文本（无外壳，footer 横条内）；
 /// 「已完成 x」为可点击链接（主色 + 粗体，悬停加深），打开归档弹窗；其余段纯展示。
 fn stats_group(app: &App) -> Element<'_, Message> {
     let total = app.todos.len();
+    let pending = app
+        .todos
+        .iter()
+        .filter(|todo| todo.status() == TodoStatus::Pending)
+        .count();
     let in_progress = app
         .todos
         .iter()
@@ -1167,21 +1188,19 @@ fn stats_group(app: &App) -> Element<'_, Message> {
         .iter()
         .filter(|todo| todo.status() == TodoStatus::Done)
         .count();
-    container(
-        row![
-            text(format!("共 {total} 项")).size(FONT_BODY),
-            text(" | ").size(FONT_BODY).color(sem(app).muted),
-            text(format!("进行中 {in_progress}")).size(FONT_BODY),
-            text(" | ").size(FONT_BODY).color(sem(app).muted),
-            button(text(format!("已完成 {done}")).size(FONT_BODY).font(BOLD))
-                .on_press(Message::OpenCompletedDialog)
-                .style(link_button_style),
-        ]
-        .align_y(Alignment::Center)
-        .spacing(SPACE_XS),
-    )
-    .padding([6.0, SPACE_L])
-    .style(summary_pill_style)
+    row![
+        text(format!("共 {total} 项")).size(FONT_BODY),
+        text(" | ").size(FONT_BODY).color(sem(app).muted),
+        text(format!("未开始 {pending}")).size(FONT_BODY),
+        text(" | ").size(FONT_BODY).color(sem(app).muted),
+        text(format!("进行中 {in_progress}")).size(FONT_BODY),
+        text(" | ").size(FONT_BODY).color(sem(app).muted),
+        button(text(format!("已完成 {done}")).size(FONT_BODY).font(BOLD))
+            .on_press(Message::OpenCompletedDialog)
+            .style(link_button_style),
+    ]
+    .align_y(Alignment::Center)
+    .spacing(SPACE_XS)
     .into()
 }
 
@@ -1199,20 +1218,6 @@ fn link_button_style(theme: &iced::Theme, status: button::Status) -> button::Sty
             ..base
         },
         _ => base,
-    }
-}
-
-/// 摘要胶囊样式：弱色底 + 胶囊圆角（悬浮在滚动内容上时可读）。
-fn summary_pill_style(theme: &iced::Theme) -> container::Style {
-    let background = theme.extended_palette().background;
-    container::Style {
-        background: Some(Background::Color(background.weak.color)),
-        border: Border {
-            color: background.strong.color,
-            width: 1.0,
-            radius: RADIUS_PILL.into(),
-        },
-        ..Default::default()
     }
 }
 

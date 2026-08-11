@@ -99,6 +99,93 @@ fn priority_picker<'a>(
     .into()
 }
 
+/// 所属项目下拉行（任务弹窗 / 卡片编辑模式共用；`with_quick_new` = 弹窗带「＋ 新建」
+/// 快速新建项目入口，点击弹出与标题栏相同的新建项目弹窗，创建成功自动选中）。
+fn project_picker_row<'a>(
+    app: &'a App,
+    label: &'static str,
+    selected: Option<Uuid>,
+    on_select: fn(Option<Uuid>) -> Message,
+    with_quick_new: bool,
+) -> Element<'a, Message> {
+    let mut row = row![
+        text(label)
+            .size(FONT_BODY)
+            .color(sem(app).muted)
+            .width(Length::Fixed(LABEL_WIDTH)),
+        PickList::new(
+            project_choices(app),
+            Some(ProjectChoice::of_id(selected, &app.projects)),
+            move |choice| on_select(choice.id),
+        )
+        .placeholder("无项目")
+        .text_size(FONT_BODY)
+        .padding([SPACE_XS, SPACE_M])
+        .style(pick_list_style)
+        .width(Length::Fill),
+    ]
+    .spacing(SPACE_S)
+    .align_y(Alignment::Center);
+    if with_quick_new {
+        row = row.push(
+            button(text("＋ 新建").size(FONT_BODY))
+                .on_press(Message::OpenQuickProjectDialog)
+                .padding([4, 8]),
+        );
+    }
+    row.into()
+}
+
+/// 优先级下拉行（任务弹窗 / 卡片编辑模式共用）。
+fn priority_row<'a>(
+    app: &'a App,
+    selected: Option<Priority>,
+    on_select: fn(Option<Priority>) -> Message,
+) -> Element<'a, Message> {
+    row![
+        text("优先级")
+            .size(FONT_BODY)
+            .color(sem(app).muted)
+            .width(Length::Fixed(LABEL_WIDTH)),
+        priority_picker(selected, on_select),
+    ]
+    .spacing(SPACE_S)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// 截止时间行：文本输入（实时校验）+ 快捷下拉（回填后仍可手动修改）。
+/// 任务弹窗 / 卡片编辑模式共用；`on_submit` 为回车提交消息，`padding` 为输入框内边距。
+fn due_row<'a>(
+    app: &'a App,
+    input: &'a str,
+    on_input: fn(String) -> Message,
+    on_quick: fn(QuickDue) -> Message,
+    on_submit: Message,
+    padding: impl Into<iced::Padding>,
+) -> Element<'a, Message> {
+    row![
+        text("截止时间")
+            .size(FONT_BODY)
+            .color(sem(app).muted)
+            .width(Length::Fixed(LABEL_WIDTH)),
+        text_input("2026-01-31 或 2026-01-31 18:30", input)
+            .on_input(on_input)
+            .on_submit(on_submit)
+            .padding(padding)
+            .width(Length::Fill),
+        Space::new().width(SPACE_S),
+        PickList::new(&QUICK_DUE_OPTIONS[..], Option::<QuickDue>::None, on_quick)
+            .placeholder("快捷时间")
+            .text_size(FONT_BODY)
+            .padding([SPACE_XS, SPACE_M])
+            .style(pick_list_style),
+    ]
+    .spacing(SPACE_S)
+    .align_y(Alignment::Center)
+    .into()
+}
+
 /// 优先级徽章 / 圆点颜色：高=红、中=橙、低=灰（取自当前主题语义色）。
 fn priority_color(sem: SemColors, priority: Priority) -> Color {
     match priority {
@@ -322,66 +409,24 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         .on_submit(Message::SubmitAddDialog)
         .padding(10);
 
-    // 所属项目："无项目" + 全部项目（与编辑模式共用选项包装）+ 快速新建入口
-    // （点击「＋ 新建」弹出与标题栏相同的新建项目弹窗，创建成功自动选中）
-    let quick_btn = button(text("＋ 新建").size(FONT_BODY))
-        .on_press(Message::OpenQuickProjectDialog)
-        .padding([4, 8]);
-    let project_picker = row![
-        text("所属项目")
-            .size(FONT_BODY)
-            .color(s.muted)
-            .width(Length::Fixed(LABEL_WIDTH)),
-        PickList::new(
-            project_choices(app),
-            Some(ProjectChoice::of_id(dialog.project_id, &app.projects)),
-            move |choice| { Message::DialogProjectChanged(choice.id) },
-        )
-        .placeholder("无项目")
-        .text_size(FONT_BODY)
-        .padding([SPACE_XS, SPACE_M])
-        .style(pick_list_style)
-        .width(Length::Fill),
-        quick_btn,
-    ]
-    .spacing(SPACE_S)
-    .align_y(Alignment::Center);
-
-    // 优先级（可选）：下拉
-    let priority_row = row![
-        text("优先级")
-            .size(FONT_BODY)
-            .color(s.muted)
-            .width(Length::Fixed(LABEL_WIDTH)),
-        priority_picker(dialog.priority, Message::DialogPriorityChanged),
-    ]
-    .spacing(SPACE_S)
-    .align_y(Alignment::Center);
-
-    // 截止时间：文本输入（实时校验）+ 快捷下拉（回填后仍可手动修改）
-    let due_row = row![
-        text("截止时间")
-            .size(FONT_BODY)
-            .color(s.muted)
-            .width(Length::Fixed(LABEL_WIDTH)),
-        text_input("2026-01-31 或 2026-01-31 18:30", &dialog.due.input)
-            .on_input(Message::DialogDueChanged)
-            .on_submit(Message::SubmitAddDialog)
-            .padding(10)
-            .width(Length::Fill),
-        Space::new().width(SPACE_S),
-        PickList::new(
-            &QUICK_DUE_OPTIONS[..],
-            Option::<QuickDue>::None,
-            Message::DialogQuickDue
-        )
-        .placeholder("快捷时间")
-        .text_size(FONT_BODY)
-        .padding([SPACE_XS, SPACE_M])
-        .style(pick_list_style),
-    ]
-    .spacing(SPACE_S)
-    .align_y(Alignment::Center);
+    // 所属项目 / 优先级 / 截止时间：与卡片编辑模式共用的表单行组件
+    // （弹窗带「＋ 新建」快速入口：点击弹出与标题栏相同的新建项目弹窗，创建成功自动选中）
+    let project_picker = project_picker_row(
+        app,
+        "所属项目",
+        dialog.project_id,
+        Message::DialogProjectChanged,
+        true,
+    );
+    let priority_row = priority_row(app, dialog.priority, Message::DialogPriorityChanged);
+    let due_row = due_row(
+        app,
+        &dialog.due.input,
+        Message::DialogDueChanged,
+        Message::DialogQuickDue,
+        Message::SubmitAddDialog,
+        10,
+    );
 
     // 表单主体；截止时间格式错误时追加红字提示
     let mut form = column![
@@ -438,7 +483,6 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         .project_dialog
         .as_ref()
         .expect("项目弹窗仅在弹窗打开时渲染");
-    let s = sem(app);
 
     // 名称（必填）：回车提交
     let name_input = text_input("项目名称（必填）", &dialog.name)
@@ -481,22 +525,15 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
     ]
     .spacing(SPACE_L);
 
-    if let Err(hint) = &dialog.start.parsed {
-        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
-    }
-    if let Err(hint) = &dialog.end.parsed {
-        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
-    }
-    if issues.name_conflict {
-        form = form.push(text("项目名已存在").size(FONT_SMALL).color(s.error));
-    }
-    if issues.range_invalid {
-        form = form.push(
-            text("开始时间必须早于结束时间")
-                .size(FONT_SMALL)
-                .color(s.error),
-        );
-    }
+    // 校验错误红字提示（弹窗 / 编辑面板共用的 helper）
+    form = push_project_form_errors(
+        form,
+        app,
+        &dialog.start.parsed,
+        &dialog.end.parsed,
+        &issues,
+        "开始时间必须早于结束时间",
+    );
 
     // 按钮行：名称为空 / 重名 / 时间非法 / 开始≥结束 时"创建"禁用
     let can_submit = validate::can_submit_project(&issues);
@@ -616,6 +653,32 @@ fn form_field<'a>(
     ]
     .spacing(SPACE_XS)
     .into()
+}
+
+/// 项目表单的校验错误红字提示（项目弹窗 / 编辑面板共用）：
+/// 按解析结果与 validate issues 追加 时间格式 / 重名 / 范围 提示。
+fn push_project_form_errors<'a>(
+    mut form: iced::widget::Column<'a, Message>,
+    app: &'a App,
+    start_parsed: &'a Result<Option<DateTime<Utc>>, String>,
+    end_parsed: &'a Result<Option<DateTime<Utc>>, String>,
+    issues: &validate::ProjectFormIssues,
+    range_text: &'static str,
+) -> iced::widget::Column<'a, Message> {
+    let s = sem(app);
+    if let Err(hint) = start_parsed {
+        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
+    }
+    if let Err(hint) = end_parsed {
+        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
+    }
+    if issues.name_conflict {
+        form = form.push(text("项目名已存在").size(FONT_SMALL).color(s.error));
+    }
+    if issues.range_invalid {
+        form = form.push(text(range_text).size(FONT_SMALL).color(s.error));
+    }
+    form
 }
 
 /// 空列表提示（整区空 / 组内空均垂直居中）。
@@ -822,7 +885,6 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
         .project_edit
         .as_ref()
         .expect("编辑面板仅在 project_edit 命中时渲染");
-    let s = sem(app);
 
     // 派生校验（单一来源 validate 模块；视图实时反馈，update 层保存时再防御一次）
     let issues = validate::project_form_issues(
@@ -874,18 +936,15 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
     ]
     .spacing(SPACE_M);
 
-    if let Err(hint) = &edit.start.parsed {
-        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
-    }
-    if let Err(hint) = &edit.end.parsed {
-        form = form.push(text(hint.as_str()).size(FONT_SMALL).color(s.error));
-    }
-    if issues.name_conflict {
-        form = form.push(text("项目名已存在").size(FONT_SMALL).color(s.error));
-    }
-    if issues.range_invalid {
-        form = form.push(text("开始须早于结束").size(FONT_SMALL).color(s.error));
-    }
+    // 校验错误红字提示（弹窗 / 编辑面板共用的 helper）
+    form = push_project_form_errors(
+        form,
+        app,
+        &edit.start.parsed,
+        &edit.end.parsed,
+        &issues,
+        "开始须早于结束",
+    );
 
     let can_submit = validate::can_submit_project(&issues);
 
@@ -1331,61 +1390,23 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         .on_submit(Message::SaveEditTodo)
         .padding(8);
 
-    // 所属项目：复用卡片上的选项包装（"无项目" + 全部项目）
-    let project_picker = row![
-        text("项目")
-            .size(FONT_BODY)
-            .color(s.muted)
-            .width(Length::Fixed(LABEL_WIDTH)),
-        PickList::new(
-            project_choices(app),
-            Some(ProjectChoice::of_id(edit.project_id, &app.projects)),
-            move |choice| Message::EditProjectChanged(choice.id),
-        )
-        .placeholder("无项目")
-        .text_size(FONT_BODY)
-        .padding([SPACE_XS, SPACE_M])
-        .style(pick_list_style)
-        .width(Length::Fill),
-    ]
-    .spacing(SPACE_S)
-    .align_y(Alignment::Center);
-
-    // 优先级（可选）：下拉
-    let priority_row = row![
-        text("优先级")
-            .size(FONT_BODY)
-            .color(s.muted)
-            .width(Length::Fixed(LABEL_WIDTH)),
-        priority_picker(edit.priority, Message::EditPriorityChanged),
-    ]
-    .spacing(SPACE_S)
-    .align_y(Alignment::Center);
-
-    // 截止时间：文本输入（实时校验）+ 快捷下拉（回填后仍可手动修改）
-    let due_row = row![
-        text("截止时间")
-            .size(FONT_BODY)
-            .color(s.muted)
-            .width(Length::Fixed(LABEL_WIDTH)),
-        text_input("2026-01-31 或 2026-01-31 18:30", &edit.due.input)
-            .on_input(Message::EditDueChanged)
-            .on_submit(Message::SaveEditTodo)
-            .padding(8)
-            .width(Length::Fill),
-        Space::new().width(SPACE_S),
-        PickList::new(
-            &QUICK_DUE_OPTIONS[..],
-            Option::<QuickDue>::None,
-            Message::EditQuickDue,
-        )
-        .placeholder("快捷时间")
-        .text_size(FONT_BODY)
-        .padding([SPACE_XS, SPACE_M])
-        .style(pick_list_style),
-    ]
-    .spacing(SPACE_S)
-    .align_y(Alignment::Center);
+    // 所属项目 / 优先级 / 截止时间：与任务弹窗共用的表单行组件（无快速新建入口）
+    let project_picker = project_picker_row(
+        app,
+        "项目",
+        edit.project_id,
+        Message::EditProjectChanged,
+        false,
+    );
+    let priority_row = priority_row(app, edit.priority, Message::EditPriorityChanged);
+    let due_row = due_row(
+        app,
+        &edit.due.input,
+        Message::EditDueChanged,
+        Message::EditQuickDue,
+        Message::SaveEditTodo,
+        8,
+    );
 
     // 头部：标题输入 + 状态徽章（保存/取消在卡片底部右下角）
     let head = row![

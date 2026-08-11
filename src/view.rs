@@ -2,7 +2,7 @@
 //!
 //! 布局：标题栏（分体按钮「＋ 添加任务 ▾」，下拉菜单含「＋ 添加项目」）+ 项目单行栏
 //! （左侧排序下拉 + 横向滚动芯片）+ 任务区（统一标题行：两列计数 + 右上角排序下拉 + 双列），
-//! 项目栏与任务区以卡片容器分组；底部角落条（bottom_cluster）：左下角主题指示器
+//! 项目栏与任务区以卡片容器分组；底部 footer（footer）：左下角主题指示器
 //! （Theme: Auto/Light/Dark，胶囊外壳，点击循环切换）+ 右下角统计胶囊
 //! （共 x 项 | 进行中 x | 已完成 x，「已完成 x」为主色粗体链接，点击打开归档弹窗）。
 //! 视觉规范统一由顶部「设计令牌」常量控制（字号 / 间距 / 圆角 / 按钮规格），
@@ -148,8 +148,6 @@ const SPACE_S: f32 = 6.0;
 const SPACE_M: f32 = 8.0;
 /// 间距：12px
 const SPACE_L: f32 = 12.0;
-/// 间距：16px
-const SPACE_XL: f32 = 16.0;
 
 /// 圆角：卡片 / 弹窗 / 分组容器 / 错误横幅
 const RADIUS_CARD: f32 = 10.0;
@@ -345,7 +343,7 @@ const BOLD: Font = Font {
 /// 任一弹窗（任务添加 / 项目添加编辑 / 已完成归档）打开时，叠加模态遮罩与弹窗卡片。
 pub fn view(app: &App) -> Element<'_, Message> {
     // 标题栏：左侧标题；右端分体按钮（「＋ 添加任务」主按钮 + 「▾」下拉箭头，
-    // 下拉菜单含「＋ 添加项目」入口）；主题指示器与任务统计移至底部角落条（bottom_cluster）
+    // 下拉菜单含「＋ 添加项目」入口）；主题指示器与任务统计位于底部 footer
     let header = row![
         text("待办清单").size(FONT_TITLE).font(BOLD),
         Space::new().width(Length::Fill),
@@ -410,18 +408,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .style(card_style),
     );
 
+    // 底部 footer：主题指示器 + 统计胶囊（常规流布局，位于任务列表卡片容器下方，不悬浮）
+    body = body.push(footer(app));
+
     let base = container(body)
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(PADDING_PAGE)
         .center_x(Length::Fill);
 
-    // 底部角落条（左下主题指示器 + 右下统计胶囊；叠加在内容之上、弹窗遮罩之下）
-    // 下拉菜单展开时：再叠 透明捕获层（点击外部关闭，无压暗）+ 右上角菜单卡片（最顶层）
-    let content = if app.add_menu_open {
+    // 下拉菜单展开时：叠加 透明捕获层（点击外部关闭，无压暗）+ 右上角菜单卡片（最顶层）
+    let content: Element<'_, Message> = if app.add_menu_open {
         stack![
             base,
-            bottom_cluster(app),
             mouse_area(
                 container(Space::new())
                     .width(Length::Fill)
@@ -442,10 +441,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         ]
         .width(Length::Fill)
         .height(Length::Fill)
+        .into()
     } else {
-        stack![base, bottom_cluster(app)]
-            .width(Length::Fill)
-            .height(Length::Fill)
+        base.into()
     };
 
     // 弹窗打开时：内容之上叠加 遮罩（点击关闭）+ 弹窗卡片（不透明，防穿透）
@@ -461,8 +459,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
         None
     };
     match dialog {
-        Some(card) => modal_overlay(content.into(), card),
-        None => content.into(),
+        Some(card) => modal_overlay(content, card),
+        None => content,
     }
 }
 
@@ -1130,8 +1128,9 @@ fn add_menu_card() -> Element<'static, Message> {
 
 // ---------- 底部角落条 ----------
 
-/// 底部角落条：左下角主题指示器 + 右下角分体统计，悬浮于内容区底部（弹窗遮罩之下）。
-fn bottom_cluster(app: &App) -> Element<'_, Message> {
+/// 底部 footer：左下角主题指示器 + 右下角统计胶囊；常规流布局固定于窗口内容区底部
+/// （任务列表卡片容器下方，不悬浮、不与滚动内容重叠；仍位于弹窗遮罩之下）。
+fn footer(app: &App) -> Element<'_, Message> {
     container(
         row![
             theme_indicator(app),
@@ -1141,9 +1140,7 @@ fn bottom_cluster(app: &App) -> Element<'_, Message> {
         .align_y(Alignment::Center),
     )
     .width(Length::Fill)
-    .height(Length::Fill)
-    .align_y(Alignment::End)
-    .padding(SPACE_XL)
+    .padding([SPACE_S, 0.0])
     .into()
 }
 

@@ -51,7 +51,7 @@ src/
 ├── main.rs     入口：iced::application 装配（boot / update / view / subscription）
 ├── model.rs    数据模型：Todo、Project、TodoStatus、App（纯数据，无 IO）
 ├── update.rs   Message 枚举 + update 纯函数（状态流转、副作用派发）
-├── view.rs     视图：设计令牌常量 + 标题栏（分体按钮 + 下拉菜单）+ 项目单行栏（横向滚动芯片）+ 编辑面板 + 任务区（任务卡片/编辑模式、时间元信息）+ 弹窗（任务/项目添加）+ 底部角落条（左下主题指示器 + 右下统计胶囊）
+├── view.rs     视图：设计令牌常量 + 标题栏（分体按钮 + 下拉菜单）+ 项目单行栏（横向滚动芯片）+ 编辑面板 + 任务区（任务卡片/编辑模式、时间元信息）+ 弹窗（任务/项目添加）+ 底部 footer（左下主题指示器 + 右下统计胶囊）
 ├── storage.rs  持久化：SQLite（quick-todo.db）+ settings.json，按 Op 增量写盘
 docs/
 └── 需求与概要设计.md     需求与概要设计文档 —— 需求 R1-R27 + 非功能 N1-N7、架构图、验收标准，改行为前必读

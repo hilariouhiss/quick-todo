@@ -25,7 +25,9 @@ use iced::widget::{
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Point, Rectangle, Size};
 use uuid::Uuid;
 
-use crate::model::{App, Priority, Project, QuickDue, SortMode, StatsDimension, Todo, TodoStatus};
+use crate::model::{
+    App, Priority, Project, QuickDue, SortMode, StatsDimension, Todo, TodoStatus, TodoType,
+};
 use crate::stats::{self, Bucket};
 use crate::update::Message;
 use crate::validate;
@@ -142,6 +144,43 @@ fn project_picker_row<'a>(
         row = row.push(
             button(text("＋ 新建").size(FONT_BODY))
                 .on_press(Message::OpenQuickProjectDialog)
+                .padding([4, 8]),
+        );
+    }
+    row.into()
+}
+
+/// 任务类型下拉行（任务弹窗 / 卡片编辑模式共用；`with_quick_new` = 弹窗带「＋ 新建」
+/// 快速新建类型入口，点击弹出与标题栏相同的新建类型弹窗，创建成功自动选中）。
+fn type_picker_row<'a>(
+    app: &'a App,
+    label: &'static str,
+    selected: Option<Uuid>,
+    on_select: fn(Option<Uuid>) -> Message,
+    with_quick_new: bool,
+) -> Element<'a, Message> {
+    let mut row = row![
+        text(label)
+            .size(FONT_BODY)
+            .color(sem(app).muted)
+            .width(Length::Fixed(LABEL_WIDTH)),
+        PickList::new(
+            type_choices(app),
+            Some(TypeChoice::of_id(selected, &app.types)),
+            move |choice| on_select(choice.id),
+        )
+        .placeholder("无类型")
+        .text_size(FONT_HEADER)
+        .padding([SPACE_XS, SPACE_M])
+        .style(pick_list_style)
+        .width(Length::Fill),
+    ]
+    .spacing(SPACE_S)
+    .align_y(Alignment::Center);
+    if with_quick_new {
+        row = row.push(
+            button(text("＋ 新建").size(FONT_BODY))
+                .on_press(Message::OpenQuickTypeDialog)
                 .padding([4, 8]),
         );
     }
@@ -323,11 +362,30 @@ pub fn view(app: &App) -> Element<'_, Message> {
         body = body.push(project_edit_panel(app));
     }
 
-    // 任务区（统一标题行 + 双列）——卡片容器分组（整区空也有容器框，无视觉跳变）
+    // 类型单行栏（项目栏下方；点击芯片筛选该类型任务）——卡片容器分组
+    body = body.push(
+        container(type_bar(app))
+            .width(Length::Fill)
+            .padding(PADDING_PANEL)
+            .style(card_style),
+    );
+
+    // 类型编辑面板：选中类型点「编辑」后在类型栏下方展开（防御：类型已删除则不渲染）
+    if app
+        .type_edit
+        .as_ref()
+        .is_some_and(|edit| app.types.iter().any(|t| t.id == edit.type_id))
+    {
+        body = body.push(type_edit_panel(app));
+    }
+
+    // 任务区（统一标题行 + 双列）——卡片容器分组（整区空也有容器框，无视觉跳变）；
+    // 项目筛选与类型筛选 AND 叠加（「全部」仅清除对应维度）
     let visible: Vec<&Todo> = app
         .todos
         .iter()
         .filter(|todo| app.selected_project.is_none() || todo.project_id == app.selected_project)
+        .filter(|todo| app.selected_type.is_none() || todo.type_id == app.selected_type)
         .collect();
     body = body.push(
         container(grouped_columns(app, visible))
@@ -376,9 +434,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     // 弹窗打开时：内容之上叠加 遮罩（点击关闭）+ 弹窗卡片（不透明，防穿透）
-    // 任务 / 项目 / 归档弹窗互斥；任务弹窗内「＋ 新建」会叠加打开项目弹窗（顶层）
-    // ——因此项目弹窗优先渲染，Esc / 遮罩关闭后返回任务弹窗（update 层保证）
-    let dialog = if app.project_dialog.is_some() {
+    // 任务 / 项目 / 类型 / 归档 / 统计弹窗互斥；任务弹窗内「＋ 新建」会叠加打开
+    // 类型 / 项目弹窗（顶层）——因此类型 / 项目弹窗优先渲染，Esc / 遮罩关闭后返回
+    // 任务弹窗（update 层保证）
+    let dialog = if app.type_dialog.is_some() {
+        Some(type_dialog_card(app))
+    } else if app.project_dialog.is_some() {
         Some(project_dialog_card(app))
     } else if app.add_dialog.is_some() {
         Some(add_dialog_card(app))
@@ -450,13 +511,20 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         .on_submit(Message::SubmitAddDialog)
         .padding(10);
 
-    // 所属项目 / 优先级 / 截止时间：与卡片编辑模式共用的表单行组件
-    // （弹窗带「＋ 新建」快速入口：点击弹出与标题栏相同的新建项目弹窗，创建成功自动选中）
+    // 所属项目 / 类型 / 优先级 / 截止时间：与卡片编辑模式共用的表单行组件
+    // （弹窗带「＋ 新建」快速入口：点击弹出与标题栏相同的新建弹窗，创建成功自动选中）
     let project_picker = project_picker_row(
         app,
         "所属项目",
         dialog.project_id,
         Message::DialogProjectChanged,
+        true,
+    );
+    let type_picker = type_picker_row(
+        app,
+        "类型",
+        dialog.type_id,
+        Message::DialogTypeChanged,
         true,
     );
     let priority_row = priority_row(app, dialog.priority, Message::DialogPriorityChanged);
@@ -476,6 +544,7 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         form_field(app, "标题", title_input),
         form_field(app, "描述", description_input),
         project_picker,
+        type_picker,
         priority_row,
         due_row,
     ]
@@ -490,7 +559,9 @@ fn add_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         &dialog.title,
         &dialog.due.parsed,
         dialog.project_id,
+        dialog.type_id,
         &app.projects,
+        &app.types,
     );
     let can_submit = validate::can_submit_todo(&issues);
     let actions = row![
@@ -589,6 +660,63 @@ fn project_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
         Space::new().width(SPACE_M),
         button(text("创建").size(FONT_HEADER))
             .on_press_maybe(can_submit.then_some(Message::SubmitProjectDialog))
+            .style(button::primary)
+            .padding(BTN_LARGE),
+    ]
+    .align_y(Alignment::Center);
+
+    container(
+        column![form, Space::new().height(SPACE_XXS), actions]
+            .spacing(SPACE_L)
+            .width(Length::Fixed(DIALOG_WIDTH)),
+    )
+    .padding(PADDING_DIALOG)
+    .style(card_style)
+    .into()
+}
+
+// ---------- 弹窗添加类型 ----------
+
+/// 类型弹窗卡片：名称（必填）+ 操作按钮（无优先级 / 无起止时间）。
+fn type_dialog_card<'a>(app: &'a App) -> Element<'a, Message> {
+    let dialog = app
+        .type_dialog
+        .as_ref()
+        .expect("类型弹窗仅在弹窗打开时渲染");
+
+    // 名称（必填）：回车提交
+    let name_input = text_input("类型名称（必填）", &dialog.name)
+        .id(TYPE_DIALOG_NAME_ID)
+        .style(text_input_style)
+        .on_input(Message::TypeNameChanged)
+        .on_submit(Message::SubmitTypeDialog)
+        .padding(10);
+
+    // 派生校验（单一来源 validate 模块；视图层实时反馈，update 层提交时再防御一次）
+    let issues = validate::type_form_issues(&dialog.name, None, &app.types);
+
+    let mut form = column![
+        text("添加类型").size(FONT_DIALOG_TITLE).font(BOLD),
+        Space::new().height(SPACE_XS),
+        form_field(app, "名称", name_input),
+    ]
+    .spacing(SPACE_L);
+
+    // 重名红字提示（空白名仅禁用按钮，不提示）
+    if issues.name_conflict {
+        form = form.push(text("类型名已存在").size(FONT_SMALL).color(sem(app).error));
+    }
+
+    // 按钮行：名称为空 / 重名时"创建"禁用
+    let can_submit = validate::can_submit_type(&issues);
+    let actions = row![
+        Space::new().width(Length::Fill),
+        button(text("取消").size(FONT_HEADER))
+            .on_press(Message::CloseTypeDialog)
+            .padding(BTN_LARGE),
+        Space::new().width(SPACE_M),
+        button(text("创建").size(FONT_HEADER))
+            .on_press_maybe(can_submit.then_some(Message::SubmitTypeDialog))
             .style(button::primary)
             .padding(BTN_LARGE),
     ]
@@ -1216,6 +1344,90 @@ fn project_bar(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// 类型单行栏：行首「类型」标签 + 横向滚动芯片区 + 选中类型时的「编辑 / 删除」上下文按钮。
+/// 与项目栏同款布局（芯片 = 名称 + 计数，点击筛选，选中主色描边高亮，
+/// 「全部」恒在最前）；无排序下拉（类型无优先级 / 时间等排序属性，按创建顺序展示）。
+fn type_bar(app: &App) -> Element<'_, Message> {
+    // 芯片区：「全部」恒在最前；无类型时灰字提示
+    let mut chips = row![type_chip(app, None, "全部", app.todos.len())].spacing(SPACE_M);
+
+    if app.types.is_empty() {
+        chips = chips.push(
+            container(text("暂无类型").size(FONT_SMALL).color(sem(app).muted))
+                .padding([6, 2])
+                .align_y(Alignment::Center),
+        );
+    } else {
+        for r#type in &app.types {
+            let count = app
+                .todos
+                .iter()
+                .filter(|todo| todo.type_id == Some(r#type.id))
+                .count();
+            chips = chips.push(type_chip(app, Some(r#type.id), &r#type.name, count));
+        }
+    }
+
+    // 选中具体类型时：右端显示「编辑 / 删除」上下文按钮（「全部」无）
+    let mut actions = row![].align_y(Alignment::Center).spacing(SPACE_XS);
+    if let Some(type_id) = app.selected_type {
+        actions = actions
+            .push(
+                button(text("编辑").size(FONT_SMALL))
+                    .on_press(Message::StartEditType(type_id))
+                    .style(button::text)
+                    .padding(BTN_TINY),
+            )
+            .push(
+                button(text("删除").size(FONT_SMALL))
+                    .on_press(Message::DeleteType(type_id))
+                    .style(button::text)
+                    .padding(BTN_TINY),
+            );
+    }
+
+    row![
+        text("类型").size(FONT_BODY).font(BOLD),
+        Space::new().width(SPACE_M),
+        scrollable(chips)
+            .direction(scrollable::Direction::Horizontal(Default::default()))
+            .width(Length::Fill)
+            .height(Length::Shrink),
+        actions,
+    ]
+    .align_y(Alignment::Center)
+    .spacing(SPACE_M)
+    .into()
+}
+
+/// 单个类型芯片：名称 + 计数；点击筛选，选中主色描边高亮（与项目芯片同款样式）。
+/// 类型无优先级圆点 / 无 tooltip（类型无优先级 / 时间属性）。
+fn type_chip<'a>(
+    app: &'a App,
+    id: Option<Uuid>,
+    name: &'a str,
+    count: usize,
+) -> Element<'a, Message> {
+    let selected = app.selected_type == id;
+    let s = sem(app);
+
+    let content = row![text(name).size(FONT_BODY)]
+        .align_y(Alignment::Center)
+        .spacing(SPACE_S)
+        .push(text(count.to_string()).size(FONT_SMALL).color(if selected {
+            // 选中态：芯片文字用 primary.weak 的可读配对色（与名称同色系，弱化字号区分）
+            extended(app).primary.weak.text
+        } else {
+            s.muted
+        }));
+
+    button(content)
+        .on_press(Message::SelectType(id))
+        .style(move |theme, status| project_chip_style(theme, status, selected))
+        .padding(BTN_MEDIUM)
+        .into()
+}
+
 /// 单个项目芯片：优先级圆点（可选）+ 名称 + 计数；点击筛选，选中主色描边高亮；
 /// 设置了起止时间的项目悬停显示时间段 tooltip。
 fn project_chip<'a>(
@@ -1401,19 +1613,81 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+// ---------- 类型栏编辑面板 ----------
+
+/// 类型栏下方展开的全宽编辑面板：名称（必填，重名校验排除自身）+ 保存 / 取消。
+fn type_edit_panel(app: &App) -> Element<'_, Message> {
+    let edit = app
+        .type_edit
+        .as_ref()
+        .expect("编辑面板仅在 type_edit 命中时渲染");
+
+    // 派生校验（单一来源 validate 模块；视图实时反馈，update 层保存时再防御一次）
+    let issues = validate::type_form_issues(&edit.name, Some(edit.type_id), &app.types);
+
+    let mut form = column![
+        column![
+            text("名称").size(FONT_TINY).color(sem(app).muted),
+            text_input("类型名称", &edit.name)
+                .id(TYPE_EDIT_NAME_ID)
+                .style(text_input_style)
+                .on_input(Message::TypeEditNameChanged)
+                .on_submit(Message::SaveEditType)
+                .padding(6),
+        ]
+        .spacing(SPACE_XXS)
+        .width(Length::Fill),
+    ]
+    .spacing(SPACE_M);
+
+    // 重名红字提示
+    if issues.name_conflict {
+        form = form.push(text("类型名已存在").size(FONT_SMALL).color(sem(app).error));
+    }
+
+    let can_submit = validate::can_submit_type(&issues);
+    let actions = row![
+        Space::new().width(Length::Fill),
+        button(text("保存").size(FONT_BODY))
+            .on_press_maybe(can_submit.then_some(Message::SaveEditType))
+            .style(button::primary)
+            .padding(BTN_CARD),
+        Space::new().width(SPACE_S),
+        button(text("取消").size(FONT_BODY))
+            .on_press(Message::CancelEditType)
+            .padding(BTN_MEDIUM),
+    ]
+    .align_y(Alignment::Center);
+
+    container(column![form, actions].spacing(SPACE_M))
+        .width(Length::Fill)
+        .padding(12)
+        .style(card_style)
+        .into()
+}
+
 // ---------- 标题栏添加下拉菜单 ----------
 
 /// 标题栏分体按钮的下拉菜单：右上角悬浮（无压暗、无卡片包裹），
-/// 「＋ 添加项目」与主按钮「＋ 添加任务」同款 primary 样式；宽度与分体按钮总宽一致
-/// （`ADD_BUTTONS_WIDTH`），左右边缘与文字起点三方对齐，避免错位割裂。
-/// 点击菜单项打开项目弹窗（弹窗互斥逻辑不变，update 层自动收起菜单）。
+/// 「＋ 添加项目」/「＋ 添加类型」与主按钮「＋ 添加任务」同款 primary 样式；
+/// 宽度与分体按钮总宽一致（`ADD_BUTTONS_WIDTH`），左右边缘与文字起点三方对齐。
+/// 点击菜单项打开对应弹窗（弹窗互斥逻辑不变，update 层自动收起菜单）。
 fn add_menu_card() -> Element<'static, Message> {
     container(
-        button(text("＋ 添加项目").size(FONT_BODY))
-            .on_press(Message::OpenProjectDialog)
-            .style(button::primary)
-            .padding(BTN_MEDIUM)
-            .width(Length::Fill),
+        column![
+            button(text("＋ 添加项目").size(FONT_BODY))
+                .on_press(Message::OpenProjectDialog)
+                .style(button::primary)
+                .padding(BTN_MEDIUM)
+                .width(Length::Fill),
+            Space::new().height(SPACE_XS),
+            button(text("＋ 添加类型").size(FONT_BODY))
+                .on_press(Message::OpenTypeDialog)
+                .style(button::primary)
+                .padding(BTN_MEDIUM)
+                .width(Length::Fill),
+        ]
+        .spacing(SPACE_XXS),
     )
     .width(Length::Fixed(ADD_BUTTONS_WIDTH))
     .into()
@@ -1830,7 +2104,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         .on_submit(Message::SaveEditTodo)
         .padding(8);
 
-    // 所属项目 / 优先级 / 截止时间：与任务弹窗共用的表单行组件（无快速新建入口）
+    // 所属项目 / 类型 / 优先级 / 截止时间：与任务弹窗共用的表单行组件（无快速新建入口）
     let project_picker = project_picker_row(
         app,
         "项目",
@@ -1838,6 +2112,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         Message::EditProjectChanged,
         false,
     );
+    let type_picker = type_picker_row(app, "类型", edit.type_id, Message::EditTypeChanged, false);
     let priority_row = priority_row(app, edit.priority, Message::EditPriorityChanged);
     let due_row = due_row(
         app,
@@ -1864,6 +2139,7 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         head,
         description_input,
         project_picker,
+        type_picker,
         priority_row,
         due_row
     ]
@@ -1877,7 +2153,9 @@ fn todo_card_editor<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
         &edit.title,
         &edit.due.parsed,
         edit.project_id,
+        edit.type_id,
         &app.projects,
+        &app.types,
     );
     let can_submit = validate::can_submit_todo(&issues);
     let actions = row![
@@ -1920,6 +2198,13 @@ fn editor_card_style(theme: &iced::Theme) -> container::Style {
 fn project_choices(app: &App) -> Vec<ProjectChoice> {
     std::iter::once(ProjectChoice::none())
         .chain(app.projects.iter().map(ProjectChoice::of))
+        .collect()
+}
+
+/// 类型下拉的选项（"无类型" + 全部类型），弹窗与编辑模式共用。
+fn type_choices(app: &App) -> Vec<TypeChoice> {
+    std::iter::once(TypeChoice::none())
+        .chain(app.types.iter().map(TypeChoice::of))
         .collect()
 }
 
@@ -1970,6 +2255,45 @@ impl ProjectChoice {
 }
 
 impl std::fmt::Display for ProjectChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// pick_list 的选项包装：`id = None` 表示"无类型"（不设置类型）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypeChoice {
+    id: Option<Uuid>,
+    label: String,
+}
+
+impl TypeChoice {
+    /// "无类型"选项。
+    fn none() -> Self {
+        Self {
+            id: None,
+            label: "无类型".into(),
+        }
+    }
+
+    /// 由类型构造选项。
+    fn of(r#type: &TodoType) -> Self {
+        Self {
+            id: Some(r#type.id),
+            label: r#type.name.clone(),
+        }
+    }
+
+    /// 按类型 id 构造选项（类型已被删除时回落为"无类型"）。
+    fn of_id(id: Option<Uuid>, types: &[TodoType]) -> Self {
+        match id.and_then(|id| types.iter().find(|t| t.id == id)) {
+            Some(r#type) => Self::of(r#type),
+            None => Self::none(),
+        }
+    }
+}
+
+impl std::fmt::Display for TypeChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.label)
     }
@@ -2027,11 +2351,24 @@ fn time_meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
     meta.into()
 }
 
-/// 普通模式的任务元信息：归属只读行 + 时间行。
+/// 任务类型的只读展示行：类型名（灰字）。未设置类型时返回 `None`——
+/// 类型被删除后任务"默认为普通任务，不对外显示"（区别于项目行恒显示"无项目"）。
+fn type_row_readonly<'a>(todo: &'a Todo, app: &'a App) -> Option<Element<'a, Message>> {
+    let name = todo
+        .type_id
+        .and_then(|id| app.types.iter().find(|t| t.id == id))
+        .map(|r#type| r#type.name.as_str())?;
+    Some(time_row(app, "类型", name.into(), sem(app).muted))
+}
+
+/// 普通模式的任务元信息：归属只读行 + 类型只读行（可选）+ 时间行。
 fn meta_rows<'a>(todo: &'a Todo, app: &'a App) -> Element<'a, Message> {
-    column![project_row_readonly(todo, app), time_meta_rows(todo, app)]
-        .spacing(SPACE_XS)
-        .into()
+    let mut meta = column![project_row_readonly(todo, app)].spacing(SPACE_XS);
+    if let Some(type_row) = type_row_readonly(todo, app) {
+        meta = meta.push(type_row);
+    }
+    meta = meta.push(time_meta_rows(todo, app));
+    meta.into()
 }
 
 /// 带固定宽度标签的一行时间信息。
@@ -2084,7 +2421,10 @@ fn format_duration(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AddDialog, ParsedField, ProjectDialog, ProjectEdit, ThemeMode, TodoEdit};
+    use crate::model::{
+        AddDialog, ParsedField, ProjectDialog, ProjectEdit, ThemeMode, TodoEdit, TypeDialog,
+        TypeEdit,
+    };
     use chrono::TimeZone;
 
     fn dt(secs: i64) -> DateTime<Utc> {
@@ -2110,6 +2450,7 @@ mod tests {
             title.into(),
             "描述".into(),
             Some(Priority::High),
+            None,
             None,
             Some(dt(1_700_100_000)),
             app.now,
@@ -2147,6 +2488,7 @@ mod tests {
             "先读需求".into(),
             Some(Priority::High),
             Some(project_id),
+            None,
             Some(dt(1_700_100_000)),
             app.now,
         );
@@ -2329,7 +2671,15 @@ mod tests {
     #[test]
     fn view_renders_todo_edit_card() {
         let mut app = sample_app();
-        let todo = Todo::new_full("写方案".into(), String::new(), None, None, None, app.now);
+        let todo = Todo::new_full(
+            "写方案".into(),
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            app.now,
+        );
         app.todos.push(todo);
         app.todo_edit = Some(TodoEdit {
             todo_id: app.todos[0].id,
@@ -2337,6 +2687,7 @@ mod tests {
             description: String::new(),
             priority: None,
             project_id: None,
+            type_id: None,
             due: ParsedField::new(),
         });
         renders(&app);
@@ -2372,6 +2723,115 @@ mod tests {
         app.projects
             .push(Project::new_full("工作".into(), None, None, None, app.now));
         app.selected_project = Some(app.projects[0].id);
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_type_bar_with_selection() {
+        // 类型单行栏：内建种子 + 选中态 + 计数
+        let mut app = sample_app();
+        let work = TodoType::new_full("工作".into(), app.now);
+        let study = TodoType::new_full("学习".into(), app.now);
+        app.types = vec![work.clone(), study.clone()];
+        let mut todo = Todo::new_full(
+            "写方案".into(),
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            app.now,
+        );
+        todo.type_id = Some(work.id);
+        app.todos.push(todo);
+        app.selected_type = Some(work.id);
+        app.selected_project = None;
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_type_bar_empty() {
+        // 类型删光：仅「全部」芯片 + 「暂无类型」提示
+        let mut app = sample_app();
+        app.types.clear();
+        renders(&app);
+    }
+
+    #[allow(clippy::field_reassign_with_default)]
+    #[test]
+    fn view_renders_type_dialog() {
+        let mut app = sample_app();
+        app.types.push(TodoType::new_full("阅读".into(), app.now));
+        let mut dialog = TypeDialog::default();
+        dialog.name = "  阅读  ".into();
+        app.type_dialog = Some(dialog);
+        renders(&app);
+    }
+
+    #[allow(clippy::field_reassign_with_default)]
+    #[test]
+    fn view_renders_type_dialog_with_conflict() {
+        // 重名红字提示路径
+        let mut app = sample_app();
+        app.types.push(TodoType::new_full("阅读".into(), app.now));
+        let mut dialog = TypeDialog::default();
+        dialog.name = "阅读".into();
+        app.type_dialog = Some(dialog);
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_type_edit_panel() {
+        let mut app = sample_app();
+        let r#type = TodoType::new_full("阅读".into(), app.now);
+        app.types.push(r#type);
+        app.selected_type = Some(app.types[0].id);
+        app.type_edit = Some(TypeEdit {
+            type_id: app.types[0].id,
+            name: "阅读".into(),
+        });
+        renders(&app);
+    }
+
+    #[allow(clippy::field_reassign_with_default)]
+    #[test]
+    fn view_renders_stacked_quick_type_dialog() {
+        // 任务弹窗内「＋ 新建」：类型弹窗叠加于任务弹窗之上（顶层优先渲染）
+        let mut app = sample_app();
+        let mut add = AddDialog::default();
+        add.title = "写方案".into();
+        app.add_dialog = Some(add);
+        app.type_dialog = Some(TypeDialog::default());
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_type_filtered_empty() {
+        // 仅类型筛选（无项目筛选）下整区空：中性空态文案路径
+        let mut app = sample_app();
+        let r#type = TodoType::new_full("阅读".into(), app.now);
+        app.types.push(r#type);
+        app.selected_type = Some(app.types[0].id);
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_todo_card_with_type_row() {
+        // 卡片类型只读行（类型存在时显示）
+        let mut app = sample_app();
+        let r#type = TodoType::new_full("阅读".into(), app.now);
+        app.types.push(r#type);
+        let mut todo = Todo::new_full(
+            "读书".into(),
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            app.now,
+        );
+        todo.type_id = Some(app.types[0].id);
+        app.todos.push(todo);
         renders(&app);
     }
 }

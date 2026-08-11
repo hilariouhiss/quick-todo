@@ -86,6 +86,7 @@ fn subscription(app: &App) -> Subscription<Message> {
     // 注意：listen_with 只接受无捕获的 fn 指针，因此固定发出 CloseActiveDialog
     if app.add_dialog.is_some()
         || app.project_dialog.is_some()
+        || app.type_dialog.is_some()
         || app.show_completed
         || app.show_stats
         || app.add_menu_open

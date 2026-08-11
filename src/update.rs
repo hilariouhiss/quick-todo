@@ -10,11 +10,14 @@ use uuid::Uuid;
 
 use crate::model::{
     AddDialog, App, ParsedField, Priority, Project, ProjectDialog, ProjectEdit, QuickDue, SortMode,
-    StatsDimension, Todo, TodoEdit, TodoStatus,
+    StatsDimension, Todo, TodoEdit, TodoStatus, TodoType, TypeDialog, TypeEdit,
 };
 use crate::storage::{self, Op, Store};
 use crate::validate;
-use crate::view::tokens::{DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID, PROJECT_EDIT_NAME_ID};
+use crate::view::tokens::{
+    DIALOG_TITLE_ID, PROJECT_DIALOG_NAME_ID, PROJECT_EDIT_NAME_ID, TYPE_DIALOG_NAME_ID,
+    TYPE_EDIT_NAME_ID,
+};
 
 /// 应用内所有可触发的消息。
 #[derive(Debug, Clone)]
@@ -53,6 +56,14 @@ pub enum Message {
     ProjectDialogPriorityChanged(Option<Priority>),
     /// 弹窗：点击"创建"/回车（校验通过后创建项目并落盘）
     SubmitProjectDialog,
+    /// 打开弹窗添加类型（名称必填）
+    OpenTypeDialog,
+    /// 关闭弹窗添加类型（丢弃已填内容，不落盘）
+    CloseTypeDialog,
+    /// 弹窗：名称输入框变化
+    TypeNameChanged(String),
+    /// 弹窗：点击"创建"/回车（校验通过后创建类型并落盘）
+    SubmitTypeDialog,
     /// 打开已完成归档弹窗（纯 UI 状态，不落盘）
     OpenCompletedDialog,
     /// 关闭已完成归档弹窗（纯 UI 状态，不落盘）
@@ -81,6 +92,18 @@ pub enum Message {
     DeleteProject(Uuid),
     /// 选中项目筛选（`None` = 全部）
     SelectProject(Option<Uuid>),
+    /// 开始编辑类型：进入类型栏下方展开的编辑面板并预填名称
+    StartEditType(Uuid),
+    /// 编辑：名称输入框变化
+    TypeEditNameChanged(String),
+    /// 保存类型编辑（校验通过后就地更新并落盘）
+    SaveEditType,
+    /// 取消类型编辑：退出编辑态
+    CancelEditType,
+    /// 删除类型（其下任务类型自动置空，任务保留）
+    DeleteType(Uuid),
+    /// 选中类型筛选（`None` = 全部；与项目筛选 AND 叠加）
+    SelectType(Option<Uuid>),
     /// 进入卡片编辑模式（预填当前字段；该卡片即"当前任务"）
     EditTodo(Uuid),
     /// 退出卡片编辑模式（丢弃修改，不落盘）
@@ -91,6 +114,8 @@ pub enum Message {
     EditDescriptionChanged(String),
     /// 编辑：项目下拉选择
     EditProjectChanged(Option<Uuid>),
+    /// 编辑：类型下拉选择
+    EditTypeChanged(Option<Uuid>),
     /// 编辑：优先级下拉选择
     EditPriorityChanged(Option<Priority>),
     /// 编辑：截止时间输入框变化（实时解析校验）
@@ -113,6 +138,8 @@ pub enum Message {
     DialogDescriptionChanged(String),
     /// 弹窗：项目下拉选择
     DialogProjectChanged(Option<Uuid>),
+    /// 弹窗：类型下拉选择
+    DialogTypeChanged(Option<Uuid>),
     /// 弹窗：优先级下拉选择
     DialogPriorityChanged(Option<Priority>),
     /// 弹窗：截止时间输入框变化（实时解析校验）
@@ -122,6 +149,9 @@ pub enum Message {
     /// 任务弹窗：点击「＋ 新建」弹出与标题栏相同的新建项目弹窗
     /// （保留任务弹窗状态，关闭项目弹窗后返回；标题栏路径见 `OpenProjectDialog`）
     OpenQuickProjectDialog,
+    /// 任务弹窗：点击「＋ 新建」弹出与标题栏相同的新建类型弹窗
+    /// （保留任务弹窗状态，关闭类型弹窗后返回；标题栏路径见 `OpenTypeDialog`）
+    OpenQuickTypeDialog,
     /// 弹窗：点击"创建"/回车提交（校验通过后创建任务并落盘）
     SubmitAddDialog,
 }
@@ -160,6 +190,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::Loaded(Ok(store)) => {
             app.todos = store.todos;
             app.projects = store.projects;
+            app.types = store.types;
             // 恢复持久化的排序偏好与主题模式（旧文件缺省已在反序列化时取默认）
             app.sort_mode = store.sort_mode;
             app.project_sort_mode = store.project_sort_mode;
@@ -194,8 +225,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::OpenProjectDialog => {
-            // 弹窗互斥：打开项目弹窗时关闭任务 / 归档 / 统计弹窗（并收起下拉菜单）
+            // 弹窗互斥：打开项目弹窗时关闭任务 / 类型 / 归档 / 统计弹窗（并收起下拉菜单）
             app.add_dialog = None;
+            app.type_dialog = None;
             app.show_completed = false;
             app.show_stats = false;
             app.add_menu_open = false;
@@ -278,10 +310,67 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             return persist(Op::InsertProject(project));
         }
 
-        Message::OpenCompletedDialog => {
-            // 弹窗互斥：打开归档弹窗时关闭任务 / 项目 / 统计弹窗（并收起下拉菜单）
+        Message::OpenTypeDialog => {
+            // 弹窗互斥：打开类型弹窗时关闭任务 / 项目 / 归档 / 统计弹窗（并收起下拉菜单）
             app.add_dialog = None;
             app.project_dialog = None;
+            app.show_completed = false;
+            app.show_stats = false;
+            app.add_menu_open = false;
+            app.type_dialog = Some(TypeDialog::default());
+            // 聚焦弹窗名称输入框（下一次渲染生效）
+            return iced::widget::operation::focus(TYPE_DIALOG_NAME_ID);
+        }
+
+        Message::CloseTypeDialog => {
+            // 关闭弹窗：丢弃已填内容（弹窗表单是纯内存状态，不落盘）
+            app.type_dialog = None;
+        }
+
+        Message::TypeNameChanged(text) => {
+            if let Some(dialog) = &mut app.type_dialog {
+                dialog.name = text;
+            }
+        }
+
+        Message::SubmitTypeDialog => {
+            // 校验不通过时恢复弹窗（保留用户输入），不产生任何副作用
+            let Some(dialog) = app.type_dialog.take() else {
+                return Task::none();
+            };
+            let restore = |app: &mut App| app.type_dialog = Some(dialog.clone());
+
+            // 校验单一来源（validate 模块）：空白名 / 重名
+            let issues = validate::type_form_issues(&dialog.name, None, &app.types);
+            if !validate::can_submit_type(&issues) {
+                restore(app);
+                return Task::none();
+            }
+
+            // 校验通过：创建类型（名称 trim 后存储、时间取自 app.now）并关闭弹窗
+            let r#type = TodoType::new_full(dialog.name.trim().to_owned(), app.now);
+            app.types.push(r#type.clone());
+            app.type_dialog = None;
+            // 从任务弹窗打开（快速新建）：自动选中新类型，焦点回落标题框
+            // （判别依据：标题栏 OpenTypeDialog 恒清空 add_dialog，因此类型弹窗打开时
+            //   add_dialog 仍在 ⇔ 快速路径）
+            if app.add_dialog.is_some() {
+                if let Some(dialog) = &mut app.add_dialog {
+                    dialog.type_id = Some(r#type.id);
+                }
+                return Task::batch([
+                    persist(Op::InsertType(r#type)),
+                    iced::widget::operation::focus(DIALOG_TITLE_ID),
+                ]);
+            }
+            return persist(Op::InsertType(r#type));
+        }
+
+        Message::OpenCompletedDialog => {
+            // 弹窗互斥：打开归档弹窗时关闭任务 / 项目 / 类型 / 统计弹窗（并收起下拉菜单）
+            app.add_dialog = None;
+            app.project_dialog = None;
+            app.type_dialog = None;
             app.show_stats = false;
             app.add_menu_open = false;
             app.show_completed = true;
@@ -293,10 +382,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::OpenStatsDialog => {
-            // 弹窗互斥：打开统计弹窗时关闭任务 / 项目 / 归档弹窗（并收起下拉菜单），
+            // 弹窗互斥：打开统计弹窗时关闭任务 / 项目 / 类型 / 归档弹窗（并收起下拉菜单），
             // 重置维度为「周」（每次打开默认「周」）
             app.add_dialog = None;
             app.project_dialog = None;
+            app.type_dialog = None;
             app.show_completed = false;
             app.add_menu_open = false;
             app.stats_dimension = StatsDimension::default();
@@ -315,7 +405,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::StartEditProject(id) => {
             if let Some(project) = app.projects.iter().find(|p| p.id == id) {
-                // 预填当前字段；起止时间经 ParsedField 回填为可解析文本（分钟粒度）
+                // 预填当前字段；起止时间经 ParsedField 回填为可解析文本（分钟粒度）；
+                // 与类型编辑面板互斥（切换编辑目标丢弃未保存修改）
+                app.type_edit = None;
                 app.project_edit = Some(ProjectEdit {
                     project_id: id,
                     name: project.name.clone(),
@@ -419,10 +511,80 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::SelectProject(selection) => app.selected_project = selection,
 
+        Message::StartEditType(id) => {
+            if let Some(r#type) = app.types.iter().find(|t| t.id == id) {
+                // 预填当前名称；与项目编辑面板互斥（切换编辑目标丢弃未保存修改）
+                app.project_edit = None;
+                app.type_edit = Some(TypeEdit {
+                    type_id: id,
+                    name: r#type.name.clone(),
+                });
+                // 聚焦编辑名称输入框（下一次渲染生效）
+                return iced::widget::operation::focus(TYPE_EDIT_NAME_ID);
+            }
+        }
+
+        Message::TypeEditNameChanged(text) => {
+            if let Some(edit) = &mut app.type_edit {
+                edit.name = text;
+            }
+        }
+
+        Message::SaveEditType => {
+            // 校验不通过时保持编辑态（保留用户输入），不产生任何副作用
+            let Some(edit) = app.type_edit.take() else {
+                return Task::none();
+            };
+            let restore = |app: &mut App| app.type_edit = Some(edit.clone());
+
+            // 校验单一来源（validate 模块）：空白名 / 重名（排除自身）
+            let issues = validate::type_form_issues(&edit.name, Some(edit.type_id), &app.types);
+            if !validate::can_submit_type(&issues) {
+                restore(app);
+                return Task::none();
+            }
+
+            if let Some(r#type) = app.types.iter_mut().find(|t| t.id == edit.type_id) {
+                // 校验通过：就地更新名称并退出编辑态
+                r#type.name = edit.name.trim().to_owned();
+                return persist(Op::UpdateType(r#type.clone()));
+            }
+            // 类型已被删除：退出编辑态（无副作用）
+        }
+
+        Message::CancelEditType => {
+            // 退出编辑态：丢弃修改（编辑表单是纯内存状态，不落盘）
+            app.type_edit = None;
+        }
+
+        Message::DeleteType(id) => {
+            let before = app.types.len();
+            app.types.retain(|r#type| r#type.id != id);
+            if app.types.len() != before {
+                // 其下任务类型置空（任务本身保留，"默认为普通任务"）
+                for todo in app.todos.iter_mut() {
+                    if todo.type_id == Some(id) {
+                        todo.type_id = None;
+                    }
+                }
+                // 若被删类型正被筛选或编辑，同步复位
+                if app.selected_type == Some(id) {
+                    app.selected_type = None;
+                }
+                if app.type_edit.as_ref().is_some_and(|e| e.type_id == id) {
+                    app.type_edit = None;
+                }
+                return persist(Op::DeleteType(id));
+            }
+        }
+
+        Message::SelectType(selection) => app.selected_type = selection,
+
         Message::ToggleAddMenu => {
             // 防御：任一弹窗打开时不可展开菜单（按钮被遮罩覆盖，UI 不可达）
             if app.add_dialog.is_some()
                 || app.project_dialog.is_some()
+                || app.type_dialog.is_some()
                 || app.show_completed
                 || app.show_stats
             {
@@ -432,14 +594,17 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::OpenAddDialog => {
-            // 弹窗互斥：打开任务弹窗时关闭项目 / 归档 / 统计弹窗（并收起下拉菜单）
+            // 弹窗互斥：打开任务弹窗时关闭项目 / 类型 / 归档 / 统计弹窗（并收起下拉菜单）
             app.project_dialog = None;
+            app.type_dialog = None;
             app.show_completed = false;
             app.show_stats = false;
             app.add_menu_open = false;
-            // 弹窗打开：处于项目筛选时预选该项目，作为默认归属
+
+            // 弹窗打开：处于项目 / 类型筛选时预选，作为默认归属 / 默认类型
             app.add_dialog = Some(AddDialog {
                 project_id: app.selected_project,
+                type_id: app.selected_type,
                 ..AddDialog::default()
             });
             // 聚焦弹窗标题输入框（下一次渲染生效）
@@ -452,8 +617,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::CloseActiveDialog => {
-            // 弹窗叠加：项目弹窗可能从任务弹窗弹出（顶层），Esc / 遮罩先关闭它并返回任务弹窗
-            if app.project_dialog.is_some() {
+            // 弹窗叠加：类型 / 项目弹窗可能从任务弹窗弹出（顶层），Esc / 遮罩先关闭它并返回任务弹窗
+            if app.type_dialog.is_some() {
+                app.type_dialog = None;
+            } else if app.project_dialog.is_some() {
                 app.project_dialog = None;
             } else if app.add_dialog.is_some() {
                 app.add_dialog = None;
@@ -491,6 +658,16 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
 
+        Message::DialogTypeChanged(type_id) => {
+            // 防御：类型必须存在（已被删除的类型不可再被选中）
+            if !validate::type_exists(&app.types, type_id) {
+                return Task::none();
+            }
+            if let Some(dialog) = &mut app.add_dialog {
+                dialog.type_id = type_id;
+            }
+        }
+
         Message::DialogPriorityChanged(priority) => {
             if let Some(dialog) = &mut app.add_dialog {
                 dialog.priority = priority;
@@ -522,6 +699,17 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             return iced::widget::operation::focus(PROJECT_DIALOG_NAME_ID);
         }
 
+        Message::OpenQuickTypeDialog => {
+            // 防御：任务弹窗未打开或类型弹窗已打开（叠加态重入，UI 不可达）时 noop
+            if app.add_dialog.is_none() || app.type_dialog.is_some() {
+                return Task::none();
+            }
+            // 与 OpenTypeDialog 不同：不清空 add_dialog（弹窗叠加，返回时保留输入）
+            app.type_dialog = Some(TypeDialog::default());
+            // 聚焦类型弹窗名称输入框（下一次渲染生效）
+            return iced::widget::operation::focus(TYPE_DIALOG_NAME_ID);
+        }
+
         Message::SubmitAddDialog => {
             // 校验不通过时恢复弹窗（保留用户输入），不产生任何副作用
             let Some(dialog) = app.add_dialog.take() else {
@@ -529,12 +717,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
             let restore = |app: &mut App| app.add_dialog = Some(dialog.clone());
 
-            // 校验单一来源（validate 模块）：空白标题 / 时间非法 / 项目不存在
-            let (title, due_at) = match validate::todo_form_values(
+            // 校验单一来源（validate 模块）：空白标题 / 时间非法 / 项目不存在 / 类型不存在
+            let (title, type_id, due_at) = match validate::todo_form_values(
                 &dialog.title,
                 &dialog.due.parsed,
                 dialog.project_id,
+                dialog.type_id,
                 &app.projects,
+                &app.types,
             ) {
                 Ok(values) => values,
                 Err(_) => {
@@ -550,6 +740,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 dialog.description.trim().to_owned(),
                 dialog.priority,
                 dialog.project_id,
+                type_id,
                 due_at,
                 app.now,
             );
@@ -567,6 +758,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     description: todo.description.clone(),
                     priority: todo.priority,
                     project_id: todo.project_id,
+                    type_id: todo.type_id,
                     due: ParsedField::prefilled(todo.due_at),
                 });
             }
@@ -599,6 +791,16 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
 
+        Message::EditTypeChanged(type_id) => {
+            // 防御：类型必须存在（已被删除的类型不可再被选中）
+            if !validate::type_exists(&app.types, type_id) {
+                return Task::none();
+            }
+            if let Some(edit) = &mut app.todo_edit {
+                edit.type_id = type_id;
+            }
+        }
+
         Message::EditPriorityChanged(priority) => {
             if let Some(edit) = &mut app.todo_edit {
                 edit.priority = priority;
@@ -626,12 +828,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             };
             let restore = |app: &mut App| app.todo_edit = Some(edit.clone());
 
-            // 校验单一来源（validate 模块）：空白标题 / 时间非法 / 项目不存在
-            let (title, due_at) = match validate::todo_form_values(
+            // 校验单一来源（validate 模块）：空白标题 / 时间非法 / 项目不存在 / 类型不存在
+            let (title, type_id, due_at) = match validate::todo_form_values(
                 &edit.title,
                 &edit.due.parsed,
                 edit.project_id,
+                edit.type_id,
                 &app.projects,
+                &app.types,
             ) {
                 Ok(values) => values,
                 Err(_) => {
@@ -649,6 +853,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             todo.description = edit.description.trim().to_owned();
             todo.priority = edit.priority;
             todo.project_id = edit.project_id;
+            todo.type_id = type_id;
             todo.due_at = due_at;
             return persist(Op::UpdateTodo(todo.clone()));
         }
@@ -1309,11 +1514,12 @@ mod tests {
     }
 
     #[test]
-    fn loaded_populates_todos_and_projects() {
+    fn loaded_populates_todos_projects_and_types() {
         let mut app = App::default();
         let store = Store {
             todos: vec![Todo::new("任务".into(), Utc::now())],
             projects: vec![Project::new("工作".into(), Utc::now())],
+            types: vec![TodoType::new_full("学习".into(), Utc::now())],
             sort_mode: SortMode::Priority,
             project_sort_mode: SortMode::Due,
             theme_mode: ThemeMode::Dark,
@@ -1323,6 +1529,8 @@ mod tests {
 
         assert_eq!(app.todos.len(), 1);
         assert_eq!(app.projects.len(), 1);
+        assert_eq!(app.types.len(), 1); // 类型列表随加载恢复
+        assert_eq!(app.types[0].name, "学习");
         assert_eq!(app.sort_mode, SortMode::Priority); // 排序偏好随加载恢复
         assert_eq!(app.project_sort_mode, SortMode::Due);
         assert_eq!(app.theme_mode, ThemeMode::Dark); // 主题模式随加载恢复
@@ -2028,5 +2236,517 @@ mod tests {
 
         assert!(!app.add_menu_open);
         assert!(app.show_completed); // 归档保持（下一次 Esc 才关闭）
+    }
+
+    // ---------- 类型 ----------
+
+    /// 直接构造类型（弹窗创建路径由 submit_type_dialog 系列测试覆盖）。
+    fn add_type(app: &mut App, name: &str) -> Uuid {
+        app.types.push(TodoType::new_full(name.into(), app.now));
+        app.types.last().unwrap().id
+    }
+
+    #[test]
+    fn open_type_dialog_initializes_form_and_closes_others() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::OpenCompletedDialog);
+        app.add_menu_open = true;
+
+        let _ = update(&mut app, Message::OpenTypeDialog);
+
+        assert!(app.type_dialog.is_some());
+        assert!(app.type_dialog.as_ref().unwrap().name.is_empty());
+        assert!(app.add_dialog.is_none()); // 任务弹窗被关闭
+        assert!(!app.show_completed); // 归档被关闭
+        assert!(!app.add_menu_open); // 菜单收起
+    }
+
+    #[test]
+    fn type_dialog_is_mutually_exclusive_with_others() {
+        let mut app = App::default();
+        // 打开类型弹窗后打开任务弹窗：类型弹窗被关闭
+        let _ = update(&mut app, Message::OpenTypeDialog);
+        let _ = update(&mut app, Message::OpenAddDialog);
+        assert!(app.add_dialog.is_some());
+        assert!(app.type_dialog.is_none());
+
+        // 打开类型弹窗后打开项目弹窗：类型弹窗被关闭
+        let _ = update(&mut app, Message::OpenTypeDialog);
+        let _ = update(&mut app, Message::OpenProjectDialog);
+        assert!(app.project_dialog.is_some());
+        assert!(app.type_dialog.is_none());
+
+        // 打开类型弹窗后打开归档弹窗：类型弹窗被关闭
+        let _ = update(&mut app, Message::OpenTypeDialog);
+        let _ = update(&mut app, Message::OpenCompletedDialog);
+        assert!(app.show_completed);
+        assert!(app.type_dialog.is_none());
+
+        // 打开类型弹窗后打开统计弹窗：类型弹窗被关闭
+        let _ = update(&mut app, Message::OpenTypeDialog);
+        let _ = update(&mut app, Message::OpenStatsDialog);
+        assert!(app.show_stats);
+        assert!(app.type_dialog.is_none());
+    }
+
+    #[test]
+    fn close_type_dialog_discards_input() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenTypeDialog);
+        let _ = update(&mut app, Message::TypeNameChanged("阅读".into()));
+
+        let _ = update(&mut app, Message::CloseTypeDialog);
+
+        assert!(app.type_dialog.is_none());
+        assert!(app.types.is_empty()); // 未创建任何类型
+    }
+
+    #[test]
+    fn type_dialog_inputs_update_form() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenTypeDialog);
+        let _ = update(&mut app, Message::TypeNameChanged("阅读".into()));
+        assert_eq!(app.type_dialog.as_ref().unwrap().name, "阅读");
+    }
+
+    #[test]
+    fn type_dialog_inputs_ignored_when_closed() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::TypeNameChanged("阅读".into()));
+        assert!(app.type_dialog.is_none());
+    }
+
+    #[test]
+    fn submit_type_dialog_creates_type() {
+        let now = Utc::now();
+        let mut app = app_with(now);
+        let _ = update(&mut app, Message::OpenTypeDialog);
+        let _ = update(&mut app, Message::TypeNameChanged("  阅读  ".into()));
+
+        let _ = update(&mut app, Message::SubmitTypeDialog);
+
+        assert!(app.type_dialog.is_none()); // 弹窗关闭
+        assert_eq!(app.types.len(), 1);
+        assert_eq!(app.types[0].name, "阅读"); // trim 后存储
+        assert_eq!(app.types[0].created_at, now); // 时间取自 app.now
+    }
+
+    #[test]
+    fn submit_type_dialog_blank_name_keeps_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenTypeDialog);
+        let _ = update(&mut app, Message::TypeNameChanged("   ".into()));
+
+        let _ = update(&mut app, Message::SubmitTypeDialog);
+
+        assert!(app.type_dialog.is_some()); // 弹窗保持打开
+        assert_eq!(app.type_dialog.as_ref().unwrap().name, "   "); // 输入保留
+        assert!(app.types.is_empty());
+    }
+
+    #[test]
+    fn submit_type_dialog_duplicate_name_keeps_dialog() {
+        let mut app = App::default();
+        add_type(&mut app, "阅读");
+        let _ = update(&mut app, Message::OpenTypeDialog);
+        let _ = update(&mut app, Message::TypeNameChanged("阅读".into()));
+
+        let _ = update(&mut app, Message::SubmitTypeDialog);
+
+        assert!(app.type_dialog.is_some()); // 重名拒绝
+        assert_eq!(app.types.len(), 1); // 未重复创建
+    }
+
+    #[test]
+    fn submit_without_open_type_dialog_is_noop() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::SubmitTypeDialog);
+        assert!(app.types.is_empty());
+    }
+
+    #[test]
+    fn start_edit_type_prefills_name_and_excludes_project_edit() {
+        let mut app = App::default();
+        let tid = add_type(&mut app, "阅读");
+        let pid = add_project(&mut app, "工作");
+        let _ = update(&mut app, Message::StartEditProject(pid));
+        assert!(app.project_edit.is_some());
+
+        let _ = update(&mut app, Message::StartEditType(tid));
+
+        let edit = app.type_edit.as_ref().unwrap();
+        assert_eq!(edit.type_id, tid);
+        assert_eq!(edit.name, "阅读");
+        assert!(app.project_edit.is_none()); // 与项目编辑面板互斥
+    }
+
+    #[test]
+    fn edit_type_unknown_id_is_noop() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::StartEditType(Uuid::now_v7()));
+        assert!(app.type_edit.is_none());
+    }
+
+    #[test]
+    fn save_edit_type_commits_name() {
+        let mut app = App::default();
+        let tid = add_type(&mut app, "阅读");
+        let _ = update(&mut app, Message::StartEditType(tid));
+        let _ = update(&mut app, Message::TypeEditNameChanged("  读书  ".into()));
+
+        let _ = update(&mut app, Message::SaveEditType);
+
+        assert!(app.type_edit.is_none()); // 退出编辑态
+        assert_eq!(app.types[0].name, "读书"); // trim 后提交
+    }
+
+    #[test]
+    fn save_edit_type_blank_or_duplicate_keeps_editing() {
+        let mut app = App::default();
+        let tid = add_type(&mut app, "阅读");
+        add_type(&mut app, "写作");
+        let _ = update(&mut app, Message::StartEditType(tid));
+
+        // 空名称
+        let _ = update(&mut app, Message::TypeEditNameChanged("   ".into()));
+        let _ = update(&mut app, Message::SaveEditType);
+        assert_eq!(app.types[0].name, "阅读");
+        assert!(app.type_edit.is_some()); // 保持编辑态
+
+        // 与其他类型重名
+        let _ = update(&mut app, Message::TypeEditNameChanged("写作".into()));
+        let _ = update(&mut app, Message::SaveEditType);
+        assert_eq!(app.types[0].name, "阅读");
+        assert!(app.type_edit.is_some());
+
+        // 与自身同名（重名校验排除自身）：允许提交
+        let _ = update(&mut app, Message::TypeEditNameChanged("阅读".into()));
+        let _ = update(&mut app, Message::SaveEditType);
+        assert!(app.type_edit.is_none());
+        assert_eq!(app.types[0].name, "阅读");
+    }
+
+    #[test]
+    fn save_edit_type_deleted_type_exits_editing() {
+        let mut app = App::default();
+        let tid = add_type(&mut app, "阅读");
+        let _ = update(&mut app, Message::StartEditType(tid));
+        app.types.clear(); // 类型在编辑期间被删除
+
+        let _ = update(&mut app, Message::SaveEditType);
+
+        assert!(app.type_edit.is_none()); // 仅退出编辑态，无副作用
+    }
+
+    #[test]
+    fn cancel_edit_type_discards_changes() {
+        let mut app = App::default();
+        let tid = add_type(&mut app, "阅读");
+        let _ = update(&mut app, Message::StartEditType(tid));
+        let _ = update(&mut app, Message::TypeEditNameChanged("改到一半".into()));
+
+        let _ = update(&mut app, Message::CancelEditType);
+
+        assert!(app.type_edit.is_none());
+        assert_eq!(app.types[0].name, "阅读"); // 名称未变
+    }
+
+    #[test]
+    fn save_without_editing_type_is_noop() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::SaveEditType);
+        assert!(app.types.is_empty());
+    }
+
+    #[test]
+    fn delete_type_unassigns_todos_and_resets_selection() {
+        let mut app = App::default();
+        let tid = add_type(&mut app, "阅读");
+        let todo_id = add_todo(&mut app, "读书");
+        app.todos
+            .iter_mut()
+            .find(|t| t.id == todo_id)
+            .unwrap()
+            .type_id = Some(tid);
+        let _ = update(&mut app, Message::SelectType(Some(tid)));
+        let _ = update(&mut app, Message::StartEditType(tid));
+
+        let _ = update(&mut app, Message::DeleteType(tid));
+
+        assert!(app.types.is_empty());
+        assert_eq!(app.todos[0].type_id, None); // 任务保留，类型置空
+        assert_eq!(app.selected_type, None); // 筛选复位
+        assert!(app.type_edit.is_none()); // 编辑态复位
+    }
+
+    #[test]
+    fn select_type_is_pure_state() {
+        let mut app = App::default();
+        let tid = add_type(&mut app, "阅读");
+
+        let _ = update(&mut app, Message::SelectType(Some(tid)));
+        assert_eq!(app.selected_type, Some(tid));
+
+        let _ = update(&mut app, Message::SelectType(None));
+        assert_eq!(app.selected_type, None);
+    }
+
+    #[test]
+    fn dialog_type_changed_guarded() {
+        let mut app = App::default();
+        let tid = add_type(&mut app, "阅读");
+        let _ = update(&mut app, Message::OpenAddDialog);
+
+        // 类型存在 → 选中
+        let _ = update(&mut app, Message::DialogTypeChanged(Some(tid)));
+        assert_eq!(app.add_dialog.as_ref().unwrap().type_id, Some(tid));
+
+        // 类型不存在 → 拒绝（防御）
+        let _ = update(&mut app, Message::DialogTypeChanged(Some(Uuid::now_v7())));
+        assert_eq!(app.add_dialog.as_ref().unwrap().type_id, Some(tid));
+    }
+
+    #[test]
+    fn edit_type_changed_guarded() {
+        let mut app = App::default();
+        let tid = add_type(&mut app, "阅读");
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+
+        let _ = update(&mut app, Message::EditTypeChanged(Some(tid)));
+        assert_eq!(app.todo_edit.as_ref().unwrap().type_id, Some(tid));
+
+        // 类型不存在 → 拒绝（防御）
+        let _ = update(&mut app, Message::EditTypeChanged(Some(Uuid::now_v7())));
+        assert_eq!(app.todo_edit.as_ref().unwrap().type_id, Some(tid));
+    }
+
+    // ---------- 任务弹窗快速新建类型（复用类型弹窗） ----------
+
+    #[test]
+    fn open_quick_type_dialog_keeps_add_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("写方案".into()));
+
+        let _ = update(&mut app, Message::OpenQuickTypeDialog);
+
+        // 类型弹窗打开（默认空表单）
+        assert!(app.type_dialog.as_ref().unwrap().name.is_empty());
+        // 任务弹窗保留且输入未丢
+        assert_eq!(app.add_dialog.as_ref().unwrap().title, "写方案");
+    }
+
+    #[test]
+    fn open_quick_type_dialog_without_add_dialog_is_noop() {
+        let mut app = App::default();
+        // 防御：任务弹窗未打开时 noop
+        let _ = update(&mut app, Message::OpenQuickTypeDialog);
+        assert!(app.type_dialog.is_none());
+
+        // 防御：类型弹窗已打开（叠加态重入）时 noop，不重建
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::OpenQuickTypeDialog);
+        let _ = update(&mut app, Message::OpenQuickTypeDialog);
+        assert!(app.type_dialog.is_some());
+        assert!(app.add_dialog.is_some());
+    }
+
+    #[test]
+    fn quick_type_dialog_creates_and_selects() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let mut app = app_with(now);
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("写方案".into()));
+        let _ = update(&mut app, Message::OpenQuickTypeDialog);
+        let _ = update(&mut app, Message::TypeNameChanged("  阅读  ".into()));
+
+        let _ = update(&mut app, Message::SubmitTypeDialog);
+
+        // 类型创建（trim + 时间取自 app.now）
+        assert_eq!(app.types.len(), 1);
+        assert_eq!(app.types[0].name, "阅读");
+        assert_eq!(app.types[0].created_at, now);
+        // 类型弹窗关闭；任务弹窗保留且自动选中新类型、其余输入未丢
+        assert!(app.type_dialog.is_none());
+        let dialog = app.add_dialog.as_ref().unwrap();
+        assert_eq!(dialog.type_id, Some(app.types[0].id));
+        assert_eq!(dialog.title, "写方案");
+    }
+
+    #[test]
+    fn quick_type_dialog_duplicate_keeps_open() {
+        let mut app = App::default();
+        add_type(&mut app, "阅读");
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::OpenQuickTypeDialog);
+        let _ = update(&mut app, Message::TypeNameChanged("阅读".into()));
+
+        let _ = update(&mut app, Message::SubmitTypeDialog);
+
+        assert_eq!(app.types.len(), 1); // 不新增
+        assert!(app.type_dialog.is_some()); // 类型弹窗保持打开
+        assert_eq!(app.add_dialog.as_ref().unwrap().type_id, None); // 任务弹窗选择不变
+    }
+
+    #[test]
+    fn close_active_dialog_with_quick_type_returns_to_add_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("写方案".into()));
+        let _ = update(&mut app, Message::OpenQuickTypeDialog);
+
+        let _ = update(&mut app, Message::CloseActiveDialog);
+
+        // 仅关闭类型弹窗（顶层），任务弹窗保留
+        assert!(app.type_dialog.is_none());
+        assert_eq!(app.add_dialog.as_ref().unwrap().title, "写方案");
+    }
+
+    #[test]
+    fn cancel_quick_type_dialog_preserves_add_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("写方案".into()));
+        let _ = update(&mut app, Message::OpenQuickTypeDialog);
+        let _ = update(&mut app, Message::TypeNameChanged("阅读".into()));
+
+        let _ = update(&mut app, Message::CloseTypeDialog);
+
+        assert!(app.type_dialog.is_none());
+        assert_eq!(app.add_dialog.as_ref().unwrap().title, "写方案"); // 任务弹窗输入保留
+    }
+
+    #[test]
+    fn quick_type_dialog_full_flow_creates_task_with_new_type() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let mut app = app_with(now);
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::OpenQuickTypeDialog);
+        let _ = update(&mut app, Message::TypeNameChanged("阅读".into()));
+        let _ = update(&mut app, Message::SubmitTypeDialog);
+        let type_id = app.types[0].id;
+
+        // 继续填写任务并提交 → 任务带快速新建的类型
+        let _ = update(&mut app, Message::DialogTitleChanged("读两章".into()));
+        let _ = update(&mut app, Message::SubmitAddDialog);
+
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].type_id, Some(type_id));
+        assert!(app.add_dialog.is_none()); // 任务弹窗关闭
+    }
+
+    #[test]
+    fn open_completed_dialog_closes_stacked_type_dialog() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::OpenQuickTypeDialog);
+        assert!(app.type_dialog.is_some());
+
+        let _ = update(&mut app, Message::OpenCompletedDialog);
+
+        // 叠加例外仅限 OpenQuickTypeDialog：归档弹窗打开时互斥清空全部
+        assert!(app.type_dialog.is_none());
+        assert!(app.add_dialog.is_none());
+        assert!(app.show_completed);
+    }
+
+    // ---------- 任务表单携带类型 ----------
+
+    #[test]
+    fn open_dialog_prefills_selected_type() {
+        let mut app = App::default();
+        let tid = add_type(&mut app, "阅读");
+        let _ = update(&mut app, Message::SelectType(Some(tid)));
+
+        let _ = update(&mut app, Message::OpenAddDialog);
+
+        let dialog = app.add_dialog.as_ref().unwrap();
+        assert_eq!(dialog.type_id, Some(tid)); // 预选当前筛选的类型
+        assert_eq!(dialog.project_id, None);
+    }
+
+    #[test]
+    fn submit_dialog_with_type_creates_todo_with_type() {
+        let now = Utc::now();
+        let mut app = app_with(now);
+        let tid = add_type(&mut app, "阅读");
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("读书".into()));
+        let _ = update(&mut app, Message::DialogTypeChanged(Some(tid)));
+
+        let _ = update(&mut app, Message::SubmitAddDialog);
+
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].type_id, Some(tid));
+    }
+
+    #[test]
+    fn submit_dialog_deleted_type_keeps_dialog() {
+        // 防御层漏检场景：直接构造非法类型（如类型在弹窗打开期间被删除）
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::DialogTitleChanged("读书".into()));
+        app.add_dialog.as_mut().unwrap().type_id = Some(Uuid::now_v7());
+
+        let _ = update(&mut app, Message::SubmitAddDialog);
+
+        assert!(app.add_dialog.is_some()); // 弹窗保持打开
+        assert!(app.todos.is_empty());
+    }
+
+    #[test]
+    fn save_edit_with_type_commits_type() {
+        let now = Utc::now();
+        let mut app = app_with(now);
+        let tid = add_type(&mut app, "阅读");
+        let todo_id = add_todo(&mut app, "写方案");
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+        let _ = update(&mut app, Message::EditTypeChanged(Some(tid)));
+
+        let _ = update(&mut app, Message::SaveEditTodo);
+
+        assert!(app.todo_edit.is_none());
+        assert_eq!(app.todos[0].type_id, Some(tid));
+    }
+
+    #[test]
+    fn edit_todo_prefills_type() {
+        let mut app = App::default();
+        let tid = add_type(&mut app, "阅读");
+        let todo_id = add_todo(&mut app, "读书");
+        app.todos[0].type_id = Some(tid);
+
+        let _ = update(&mut app, Message::EditTodo(todo_id));
+
+        assert_eq!(app.todo_edit.as_ref().unwrap().type_id, Some(tid)); // 预填类型
+    }
+
+    // ---------- 类型弹窗的 Esc / 菜单守卫 ----------
+
+    #[test]
+    fn close_active_dialog_closes_type_dialog_first() {
+        let mut app = App::default();
+        // 叠加态：类型弹窗在任务弹窗之上（顶层先关）
+        let _ = update(&mut app, Message::OpenAddDialog);
+        let _ = update(&mut app, Message::OpenQuickTypeDialog);
+
+        let _ = update(&mut app, Message::CloseActiveDialog);
+        assert!(app.type_dialog.is_none());
+        assert!(app.add_dialog.is_some()); // 任务弹窗保留
+
+        // 再 Esc：关闭任务弹窗
+        let _ = update(&mut app, Message::CloseActiveDialog);
+        assert!(app.add_dialog.is_none());
+    }
+
+    #[test]
+    fn toggle_menu_blocked_when_type_dialog_open() {
+        let mut app = App::default();
+        let _ = update(&mut app, Message::OpenTypeDialog);
+
+        let _ = update(&mut app, Message::ToggleAddMenu);
+        assert!(!app.add_menu_open);
     }
 }

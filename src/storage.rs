@@ -15,13 +15,14 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::model::{Priority, Project, SortMode, ThemeMode, Todo};
+use crate::model::{Priority, Project, SortMode, ThemeMode, Todo, TodoType};
 
-/// 内存持久化数据：任务 + 项目 + 排序偏好 + 主题模式（load 结果 / persist 数据源）。
+/// 内存持久化数据：任务 + 项目 + 类型 + 排序偏好 + 主题模式（load 结果 / persist 数据源）。
 #[derive(Debug, Clone, Default)]
 pub struct Store {
     pub todos: Vec<Todo>,
     pub projects: Vec<Project>,
+    pub types: Vec<TodoType>,
     pub sort_mode: SortMode,
     pub project_sort_mode: SortMode,
     pub theme_mode: ThemeMode,
@@ -61,6 +62,12 @@ pub enum Op {
     UpdateProject(Project),
     /// 删除项目（单事务内先解除其下任务归属，与内存语义一致）
     DeleteProject(Uuid),
+    /// 新增类型（含首次建库的种子，见 `open_db`）
+    InsertType(TodoType),
+    /// 更新类型（编辑保存）
+    UpdateType(TodoType),
+    /// 删除类型（单事务内先清空其下任务类型，与内存语义一致）
+    DeleteType(Uuid),
 }
 
 /// 数据目录：可执行文件同目录（`current_exe()` 失败时退化当前目录）。
@@ -81,13 +88,14 @@ pub fn settings_file() -> PathBuf {
     data_dir().join("settings.json")
 }
 
-/// 从默认位置加载任务 / 项目 / 排序偏好（DB 缺失视为空数据，settings 缺失取默认「综合」）。
+/// 从默认位置加载任务 / 项目 / 类型 / 排序偏好（DB 缺失视为空数据，settings 缺失取默认「综合」）。
 pub async fn load() -> Result<Store, String> {
-    let (todos, projects) = load_db_from(&db_file()).await?;
+    let (todos, projects, types) = load_db_from(&db_file()).await?;
     let settings = load_settings_from(&settings_file()).await?;
     Ok(Store {
         todos,
         projects,
+        types,
         sort_mode: settings.sort_mode,
         project_sort_mode: settings.project_sort_mode,
         theme_mode: settings.theme_mode,
@@ -149,8 +157,11 @@ async fn write_settings_atomic(path: &Path, settings: &Settings) -> Result<(), S
     Ok(())
 }
 
+/// 数据库加载结果：任务 + 项目 + 类型（均按 rowid 顺序）。
+type LoadedData = (Vec<Todo>, Vec<Project>, Vec<TodoType>);
+
 /// 从指定路径加载数据库内容（供测试复用）。
-async fn load_db_from(path: &Path) -> Result<(Vec<Todo>, Vec<Project>), String> {
+async fn load_db_from(path: &Path) -> Result<LoadedData, String> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || load_db_sync(&path))
         .await
@@ -175,27 +186,70 @@ async fn apply_to(path: PathBuf, op: Op) -> Result<(), String> {
         .map_err(|error| format!("写盘任务失败: {error}"))?
 }
 
+/// 内建类型种子（首次建库时插入；入库后与自定义类型**完全同权**——可编辑 / 可删除，
+/// 无 builtin 标志字段；删除后重启不复活，见 `open_db` 的插入时机判定）。
+const BUILTIN_TYPES: [&str; 6] = ["工作", "学习", "生活", "运动", "健康", "娱乐"];
+
 /// 打开数据库并初始化 schema（幂等；垃圾字节文件在此触发 SQLITE_NOTADB）。
+/// 种子插入时机：**types 表从无到有**（全新库 / 旧库首次升级）时单事务插入 6 个内建类型；
+/// 表已存在（含用户删光后）不再触发——删除后重启不复活。
+/// `types.name` 带 UNIQUE 约束 + `INSERT OR IGNORE`：fire-and-forget 并发首写（两个连接
+/// 同时判定表不存在）时也不会重复插入同名种子。
 fn open_db(path: &Path) -> Result<Connection, String> {
-    let conn = Connection::open(path)
+    let mut conn = Connection::open(path)
         .map_err(|error| format!("打开数据库 {} 失败: {error}", path.display()))?;
     conn.busy_timeout(Duration::from_secs(2))
         .map_err(|error| format!("设置 busy_timeout 失败: {error}"))?;
     conn.pragma_update(None, "foreign_keys", true)
         .map_err(|error| format!("启用外键失败: {error}"))?;
+
+    // 先判定 types 表是否存在（建表前查询），作为种子插入时机（从无到有才插一次）
+    let types_existed = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'types'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .map_err(|error| format!("检查 types 表失败: {error}"))?;
+
     conn.execute_batch(SCHEMA)
         .map_err(|error| format!("初始化数据库表失败: {error}"))?;
+
+    // types 表从无到有：单事务插入内建种子（幂等；`INSERT OR IGNORE` 防并发重复）
+    if !types_existed {
+        let tx = conn
+            .transaction()
+            .map_err(|error| format!("开启事务失败: {error}"))?;
+        for name in BUILTIN_TYPES {
+            tx.execute(
+                "INSERT OR IGNORE INTO types (id, name, created_at) VALUES (?1, ?2, ?3)",
+                params![Uuid::now_v7().to_string(), name, Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| format!("插入内建类型「{name}」失败: {error}"))?;
+        }
+        tx.commit()
+            .map_err(|error| format!("提交内建类型失败: {error}"))?;
+    }
+
     Ok(conn)
 }
 
 /// 建表 DDL（开发阶段破坏性更新直接改此 SQL，旧库不兼容即报错）。
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS types (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS todos (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     priority    TEXT,
     project_id  TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    type_id     TEXT REFERENCES types(id) ON DELETE SET NULL,
     due_at      TEXT,
     created_at  TEXT NOT NULL,
     started_at  TEXT,
@@ -203,6 +257,7 @@ CREATE TABLE IF NOT EXISTS todos (
 );
 CREATE INDEX IF NOT EXISTS idx_todos_project ON todos(project_id);
 CREATE INDEX IF NOT EXISTS idx_todos_due ON todos(due_at);
+CREATE INDEX IF NOT EXISTS idx_todos_type ON todos(type_id);
 
 CREATE TABLE IF NOT EXISTS projects (
     id          TEXT PRIMARY KEY,
@@ -245,6 +300,18 @@ fn apply_sync(path: &Path, op: &Op) -> Result<(), String> {
             )
             .map_err(|error| format!("删除项目失败: {error}"))?;
         }
+        Op::InsertType(r#type) => insert_type(&tx, r#type)?,
+        Op::UpdateType(r#type) => update_type(&tx, r#type)?,
+        Op::DeleteType(id) => {
+            // 与内存语义一致：先清空其下任务类型，再删除类型本身
+            tx.execute(
+                "UPDATE todos SET type_id = NULL WHERE type_id = ?1",
+                params![id.to_string()],
+            )
+            .map_err(|error| format!("清空任务类型失败: {error}"))?;
+            tx.execute("DELETE FROM types WHERE id = ?1", params![id.to_string()])
+                .map_err(|error| format!("删除类型失败: {error}"))?;
+        }
     }
     tx.commit()
         .map_err(|error| format!("提交事务失败: {error}"))?;
@@ -253,14 +320,15 @@ fn apply_sync(path: &Path, op: &Op) -> Result<(), String> {
 
 fn insert_todo(tx: &rusqlite::Transaction<'_>, todo: &Todo) -> Result<(), String> {
     tx.execute(
-        "INSERT INTO todos (id, title, description, priority, project_id, due_at, created_at, started_at, finished_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO todos (id, title, description, priority, project_id, type_id, due_at, created_at, started_at, finished_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             todo.id.to_string(),
             todo.title,
             todo.description,
             priority_text(todo.priority),
             option_id_text(todo.project_id),
+            option_id_text(todo.type_id),
             option_time_text(todo.due_at),
             todo.created_at.to_rfc3339(),
             option_time_text(todo.started_at),
@@ -274,13 +342,14 @@ fn insert_todo(tx: &rusqlite::Transaction<'_>, todo: &Todo) -> Result<(), String
 fn update_todo(tx: &rusqlite::Transaction<'_>, todo: &Todo) -> Result<(), String> {
     tx.execute(
         "UPDATE todos SET title = ?2, description = ?3, priority = ?4, project_id = ?5,
-         due_at = ?6, created_at = ?7, started_at = ?8, finished_at = ?9 WHERE id = ?1",
+         type_id = ?6, due_at = ?7, created_at = ?8, started_at = ?9, finished_at = ?10 WHERE id = ?1",
         params![
             todo.id.to_string(),
             todo.title,
             todo.description,
             priority_text(todo.priority),
             option_id_text(todo.project_id),
+            option_id_text(todo.type_id),
             option_time_text(todo.due_at),
             todo.created_at.to_rfc3339(),
             option_time_text(todo.started_at),
@@ -325,17 +394,43 @@ fn update_project(tx: &rusqlite::Transaction<'_>, project: &Project) -> Result<(
     Ok(())
 }
 
-fn load_db_sync(path: &Path) -> Result<(Vec<Todo>, Vec<Project>), String> {
+fn insert_type(tx: &rusqlite::Transaction<'_>, r#type: &TodoType) -> Result<(), String> {
+    tx.execute(
+        "INSERT INTO types (id, name, created_at) VALUES (?1, ?2, ?3)",
+        params![
+            r#type.id.to_string(),
+            r#type.name,
+            r#type.created_at.to_rfc3339()
+        ],
+    )
+    .map_err(|error| format!("插入类型失败: {error}"))?;
+    Ok(())
+}
+
+fn update_type(tx: &rusqlite::Transaction<'_>, r#type: &TodoType) -> Result<(), String> {
+    tx.execute(
+        "UPDATE types SET name = ?2, created_at = ?3 WHERE id = ?1",
+        params![
+            r#type.id.to_string(),
+            r#type.name,
+            r#type.created_at.to_rfc3339()
+        ],
+    )
+    .map_err(|error| format!("更新类型失败: {error}"))?;
+    Ok(())
+}
+
+fn load_db_sync(path: &Path) -> Result<LoadedData, String> {
     if !path.exists() {
         // 缺失视为空数据（不建表，首次写入时自动创建）
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
     let conn = open_db(path)?;
 
     let mut todos = Vec::new();
     let mut stmt = conn
         .prepare(
-            "SELECT id, title, description, priority, project_id, due_at, created_at, started_at, finished_at
+            "SELECT id, title, description, priority, project_id, type_id, due_at, created_at, started_at, finished_at
              FROM todos ORDER BY rowid",
         )
         .map_err(|error| format!("查询任务失败: {error}"))?;
@@ -347,6 +442,7 @@ fn load_db_sync(path: &Path) -> Result<(Vec<Todo>, Vec<Project>), String> {
                 row.get::<_, String>("description")?,
                 row.get::<_, Option<String>>("priority")?,
                 row.get::<_, Option<String>>("project_id")?,
+                row.get::<_, Option<String>>("type_id")?,
                 row.get::<_, Option<String>>("due_at")?,
                 row.get::<_, String>("created_at")?,
                 row.get::<_, Option<String>>("started_at")?,
@@ -361,6 +457,7 @@ fn load_db_sync(path: &Path) -> Result<(Vec<Todo>, Vec<Project>), String> {
             description,
             priority,
             project_id,
+            type_id,
             due_at,
             created_at,
             started_at,
@@ -372,6 +469,7 @@ fn load_db_sync(path: &Path) -> Result<(Vec<Todo>, Vec<Project>), String> {
             description,
             priority: parse_priority(priority.as_deref()),
             project_id: parse_option_uuid(project_id.as_deref())?,
+            type_id: parse_option_uuid(type_id.as_deref())?,
             due_at: parse_option_time(due_at.as_deref())?,
             created_at: parse_time(&created_at)?,
             started_at: parse_option_time(started_at.as_deref())?,
@@ -411,7 +509,29 @@ fn load_db_sync(path: &Path) -> Result<(Vec<Todo>, Vec<Project>), String> {
         });
     }
 
-    Ok((todos, projects))
+    let mut types = Vec::new();
+    let mut stmt = conn
+        .prepare("SELECT id, name, created_at FROM types ORDER BY rowid")
+        .map_err(|error| format!("查询类型失败: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>("id")?,
+                row.get::<_, String>("name")?,
+                row.get::<_, String>("created_at")?,
+            ))
+        })
+        .map_err(|error| format!("读取类型失败: {error}"))?;
+    for row in rows {
+        let (id, name, created_at) = row.map_err(|error| format!("解析类型行失败: {error}"))?;
+        types.push(TodoType {
+            id: parse_uuid(&id)?,
+            name,
+            created_at: parse_time(&created_at)?,
+        });
+    }
+
+    Ok((todos, projects, types))
 }
 
 /// 优先级 → 英文变体名文本（`None` → NULL）。
@@ -480,6 +600,7 @@ mod tests {
                 description: "睡前读两章".into(),
                 priority: Some(Priority::High),
                 project_id: None,
+                type_id: None,
                 due_at: Some(chrono::Utc::now() + chrono::Duration::days(1)),
                 created_at: Utc::now(),
                 started_at: None,
@@ -491,6 +612,7 @@ mod tests {
                 description: String::new(),
                 priority: None,
                 project_id: None,
+                type_id: None,
                 due_at: None,
                 created_at: Utc::now(),
                 started_at: Some(Utc::now()),
@@ -522,7 +644,7 @@ mod tests {
                 .unwrap();
         }
 
-        let (loaded_todos, loaded_projects) = load_db_from(&path).await.unwrap();
+        let (loaded_todos, loaded_projects, loaded_types) = load_db_from(&path).await.unwrap();
         assert_eq!(loaded_todos.len(), 2);
         assert_eq!(loaded_todos[0].title, "读书");
         assert_eq!(loaded_todos[0].description, "睡前读两章"); // 描述往返保留
@@ -541,6 +663,10 @@ mod tests {
         assert_eq!(loaded_projects[0].started_at, project.started_at); // 起止时间往返保留
         assert_eq!(loaded_projects[0].finished_at, project.finished_at);
         assert_eq!(loaded_projects[0].priority, project.priority);
+        // 首次建库自动插入 6 个内建类型种子
+        assert_eq!(loaded_types.len(), 6);
+        let names: Vec<&str> = loaded_types.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["工作", "学习", "生活", "运动", "健康", "娱乐"]);
 
         let _ = std::fs::remove_file(&path).ok();
     }
@@ -569,7 +695,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (loaded, _) = load_db_from(&path).await.unwrap();
+        let (loaded, _, _) = load_db_from(&path).await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].title, "已改标题");
         assert!(loaded[0].started_at.is_some());
@@ -599,7 +725,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (todos, projects) = load_db_from(&path).await.unwrap();
+        let (todos, projects, _) = load_db_from(&path).await.unwrap();
         assert!(todos.is_empty());
         assert!(projects.is_empty());
 
@@ -625,7 +751,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (todos, projects) = load_db_from(&path).await.unwrap();
+        let (todos, projects, _) = load_db_from(&path).await.unwrap();
         assert!(projects.is_empty());
         assert_eq!(todos.len(), 1);
         assert_eq!(todos[0].project_id, None);
@@ -743,19 +869,21 @@ mod tests {
         let path = temp_path("missing.db");
         let _ = std::fs::remove_file(&path).ok();
 
-        // 缺失 → 空数据
-        let (todos, projects) = load_db_from(&path).await.unwrap();
+        // 缺失 → 空数据（含类型列表）
+        let (todos, projects, types) = load_db_from(&path).await.unwrap();
         assert!(todos.is_empty());
         assert!(projects.is_empty());
+        assert!(types.is_empty());
 
-        // 首次写入自动建表成功
+        // 首次写入自动建表成功（种子随表创建插入）
         let todo = Todo::new("新任务".into(), dt());
         apply_to(path.clone(), Op::InsertTodo(todo.clone()))
             .await
             .unwrap();
-        let (todos, _) = load_db_from(&path).await.unwrap();
+        let (todos, _, types) = load_db_from(&path).await.unwrap();
         assert_eq!(todos.len(), 1);
         assert_eq!(todos[0].title, "新任务");
+        assert_eq!(types.len(), 6); // 内建类型种子已插入
 
         let _ = std::fs::remove_file(&path).ok();
     }
@@ -767,6 +895,131 @@ mod tests {
 
         // Connection::open 对垃圾字节成功，实际执行语句时才触发 NOTADB
         let result = load_db_from(&path).await;
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn types_roundtrip_and_delete_unassigns_todos() {
+        let path = temp_path("types.db");
+        let _ = std::fs::remove_file(&path).ok();
+        let r#type = TodoType::new_full("自定义类型".into(), dt());
+        let mut todo = Todo::new("带类型任务".into(), dt());
+        todo.type_id = Some(r#type.id);
+
+        // 插入类型 + 带类型的任务 → 往返保留
+        apply_to(path.clone(), Op::InsertType(r#type.clone()))
+            .await
+            .unwrap();
+        apply_to(path.clone(), Op::InsertTodo(todo.clone()))
+            .await
+            .unwrap();
+        let (loaded, _, loaded_types) = load_db_from(&path).await.unwrap();
+        assert_eq!(loaded_types.len(), 7); // 6 种子 + 1 自定义
+        assert_eq!(loaded_types[6].id, r#type.id);
+        assert_eq!(loaded_types[6].name, "自定义类型");
+        assert_eq!(loaded_types[6].created_at, r#type.created_at);
+        assert_eq!(loaded[0].type_id, Some(r#type.id)); // 任务类型往返保留
+
+        // 更新类型名称 → 往返保留
+        let mut renamed = r#type.clone();
+        renamed.name = "改名后".into();
+        apply_to(path.clone(), Op::UpdateType(renamed))
+            .await
+            .unwrap();
+        let (_, _, loaded_types) = load_db_from(&path).await.unwrap();
+        assert_eq!(loaded_types[6].name, "改名后");
+
+        // 删除类型：其下任务类型被清空（与内存语义一致），任务本身保留
+        apply_to(path.clone(), Op::DeleteType(r#type.id))
+            .await
+            .unwrap();
+        let (loaded, _, loaded_types) = load_db_from(&path).await.unwrap();
+        assert_eq!(loaded_types.len(), 6); // 回到种子
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].type_id, None);
+
+        let _ = std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn builtin_seeds_deleted_do_not_resurrect() {
+        let path = temp_path("seeds.db");
+        let _ = std::fs::remove_file(&path).ok();
+
+        // 首次建库：6 个种子
+        apply_to(path.clone(), Op::InsertTodo(Todo::new("任务".into(), dt())))
+            .await
+            .unwrap();
+        let (_, _, types) = load_db_from(&path).await.unwrap();
+        assert_eq!(types.len(), 6);
+
+        // 用户删除全部内建类型（与自定义同权）
+        for r#type in types {
+            apply_to(path.clone(), Op::DeleteType(r#type.id))
+                .await
+                .unwrap();
+        }
+        let (_, _, types) = load_db_from(&path).await.unwrap();
+        assert!(types.is_empty());
+
+        // 再次写入触发 open_db：表已存在，种子不复活
+        apply_to(
+            path.clone(),
+            Op::InsertTodo(Todo::new("又一条".into(), dt())),
+        )
+        .await
+        .unwrap();
+        let (_, _, types) = load_db_from(&path).await.unwrap();
+        assert!(types.is_empty());
+
+        let _ = std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn old_schema_db_without_type_column_reports_error() {
+        // 旧库（无 type_id 列）→ 破坏性更新：load 报错（UI 红字提示，不迁移）
+        let path = temp_path("old-schema.db");
+        let _ = std::fs::remove_file(&path).ok();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE todos (
+                id          TEXT PRIMARY KEY,
+                title       TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                priority    TEXT,
+                project_id  TEXT,
+                due_at      TEXT,
+                created_at  TEXT NOT NULL,
+                started_at  TEXT,
+                finished_at TEXT
+            );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = load_db_from(&path).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("type_id")); // 缺列报错
+
+        let _ = std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn duplicate_type_name_rejected_by_unique() {
+        // UNIQUE(name)：重名类型在 DB 层拒绝（重名校验在 validate 层先行，此处为防御）
+        let path = temp_path("dup-type.db");
+        let _ = std::fs::remove_file(&path).ok();
+        apply_to(path.clone(), Op::InsertTodo(Todo::new("任务".into(), dt())))
+            .await
+            .unwrap();
+        let (_, _, types) = load_db_from(&path).await.unwrap();
+        assert_eq!(types[0].name, "工作"); // 种子「工作」
+
+        // 手动构造与种子重名的自定义类型（绕过 validate 的防御路径）
+        let dup = TodoType::new_full("工作".into(), dt());
+        let result = apply_to(path.clone(), Op::InsertType(dup)).await;
         assert!(result.is_err());
 
         let _ = std::fs::remove_file(&path).ok();

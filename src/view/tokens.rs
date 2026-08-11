@@ -126,3 +126,10 @@ pub(crate) const PROJECT_DIALOG_NAME_ID: iced::widget::Id =
 /// 项目内联编辑名称输入框的 widget Id（进入编辑态时聚焦用）
 pub(crate) const PROJECT_EDIT_NAME_ID: iced::widget::Id =
     iced::widget::Id::new("edit-project-name");
+
+/// 类型弹窗名称输入框的 widget Id（打开弹窗时聚焦用）
+pub(crate) const TYPE_DIALOG_NAME_ID: iced::widget::Id =
+    iced::widget::Id::new("add-type-dialog-name");
+
+/// 类型栏内联编辑名称输入框的 widget Id（进入编辑态时聚焦用）
+pub(crate) const TYPE_EDIT_NAME_ID: iced::widget::Id = iced::widget::Id::new("edit-type-name");

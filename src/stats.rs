@@ -249,7 +249,7 @@ mod tests {
 
     /// 已完成任务：`finish` 前 `started_before` 开始。
     fn done(title: &str, finish: DateTime<Utc>, started_before: Duration) -> Todo {
-        let mut t = Todo::new_full(title.into(), String::new(), None, None, None, finish);
+        let mut t = Todo::new_full(title.into(), String::new(), None, None, None, None, finish);
         t.started_at = Some(finish - started_before);
         t.finished_at = Some(finish);
         t
@@ -257,7 +257,7 @@ mod tests {
 
     /// 已完成任务但缺 `started_at`（防御场景：状态推导保证实际不可能）。
     fn done_no_start(title: &str, finish: DateTime<Utc>) -> Todo {
-        let mut t = Todo::new_full(title.into(), String::new(), None, None, None, finish);
+        let mut t = Todo::new_full(title.into(), String::new(), None, None, None, None, finish);
         t.finished_at = Some(finish);
         t
     }

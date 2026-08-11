@@ -186,6 +186,8 @@ pub struct Todo {
     pub priority: Option<Priority>,
     /// 所属项目（`None` = 未归属）。
     pub project_id: Option<Uuid>,
+    /// 任务类型（`None` = 无类型 / 普通任务）。
+    pub type_id: Option<Uuid>,
     /// 截止时间（`None` = 无截止）。
     pub due_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -194,20 +196,21 @@ pub struct Todo {
 }
 
 impl Todo {
-    /// 创建一条**仅标题**的新任务（无描述 / 无优先级 / 无项目 / 无截止时间；
-    /// 等价于 `new_full(title, "", None, None, None, now)`）。**仅测试便捷使用**——
+    /// 创建一条**仅标题**的新任务（无描述 / 无优先级 / 无项目 / 无类型 / 无截止时间；
+    /// 等价于 `new_full(title, "", None, None, None, None, now)`）。**仅测试便捷使用**——
     /// 生产提交路径恒走 `new_full`，无单独分支。
     #[cfg(test)]
     pub fn new(title: String, now: DateTime<Utc>) -> Self {
-        Self::new_full(title, String::new(), None, None, None, now)
+        Self::new_full(title, String::new(), None, None, None, None, now)
     }
 
-    /// 创建一条完整配置的新任务（弹窗添加用）：描述 + 优先级 + 归属项目 + 截止时间。
+    /// 创建一条完整配置的新任务（弹窗添加用）：描述 + 优先级 + 归属项目 + 类型 + 截止时间。
     pub fn new_full(
         title: String,
         description: String,
         priority: Option<Priority>,
         project_id: Option<Uuid>,
+        type_id: Option<Uuid>,
         due_at: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
     ) -> Self {
@@ -217,6 +220,7 @@ impl Todo {
             description,
             priority,
             project_id,
+            type_id,
             due_at,
             created_at: now,
             started_at: None,
@@ -326,6 +330,31 @@ impl Project {
     }
 }
 
+/// 任务类型：任务的可选分类（每条任务 0 或 1 个类型）。
+///
+/// 内建类型（工作 / 学习 / 生活 / 运动 / 健康 / 娱乐）为首次建库时插入的**种子数据**，
+/// 入库后与用户自定义类型**完全同权**（可编辑 / 可删除，无 builtin 标志字段）；
+/// 种子仅在 types 表从无到有时插入一次（storage 层保证），删除后重启不复活。
+#[derive(Debug, Clone)]
+pub struct TodoType {
+    pub id: Uuid,
+    /// 类型名称（trim 后非空且不重名，内建与自定义统一校验）。
+    pub name: String,
+    /// 创建时间（用户创建时取自 `app.now`；种子由 storage 层记录当前时间）。
+    pub created_at: DateTime<Utc>,
+}
+
+impl TodoType {
+    /// 创建一条新类型（时间取自 `app.now`）。
+    pub fn new_full(name: String, now: DateTime<Utc>) -> Self {
+        Self {
+            id: Uuid::now_v7(),
+            name,
+            created_at: now,
+        }
+    }
+}
+
 /// 时间输入框的"原文 + 实时解析结果"缓存对（任务截止时间 / 项目起止时间共用）。
 /// 输入变化即实时解析（非法格式立即提示），提交时复用缓存结果做最终校验。
 #[derive(Debug, Clone)]
@@ -370,8 +399,8 @@ impl Default for ParsedField {
 }
 
 /// 弹窗添加任务的表单状态（纯内存，不持久化；`App.add_dialog = None` 表示弹窗关闭）。
-/// 所属项目的快速新建入口见 `OpenQuickProjectDialog`：弹出与标题栏相同的新建项目弹窗，
-/// 创建成功后自动选中新项目（`project_id`），任务弹窗本身不持有快速新建状态。
+/// 所属项目 / 类型的快速新建入口见 `OpenQuickProjectDialog` / `OpenQuickTypeDialog`：
+/// 弹出与标题栏相同的新建弹窗，创建成功后自动选中，任务弹窗本身不持有快速新建状态。
 #[derive(Debug, Clone, Default)]
 pub struct AddDialog {
     /// 标题输入
@@ -382,6 +411,8 @@ pub struct AddDialog {
     pub priority: Option<Priority>,
     /// 所属项目（`None` = 无项目）
     pub project_id: Option<Uuid>,
+    /// 任务类型（`None` = 无类型）
+    pub type_id: Option<Uuid>,
     /// 截止时间输入框的原文 + 实时解析结果
     pub due: ParsedField,
 }
@@ -397,6 +428,23 @@ pub struct ProjectDialog {
     pub start: ParsedField,
     /// 结束时间输入框的原文 + 实时解析结果
     pub end: ParsedField,
+}
+
+/// 弹窗添加类型的表单状态（纯内存，不持久化；`App.type_dialog = None` 表示弹窗关闭）。
+/// 类型仅名称字段（无优先级 / 无起止时间）。
+#[derive(Debug, Clone, Default)]
+pub struct TypeDialog {
+    /// 名称输入
+    pub name: String,
+}
+
+/// 类型栏编辑面板的表单状态（纯内存，不持久化；`App.type_edit = None` 表示未处于编辑态）。
+#[derive(Debug, Clone)]
+pub struct TypeEdit {
+    /// 正在编辑的类型 id
+    pub type_id: Uuid,
+    /// 名称输入
+    pub name: String,
 }
 
 /// 项目编辑面板的表单状态（纯内存，不持久化；`App.project_edit = None` 表示未处于编辑态）。
@@ -415,7 +463,7 @@ pub struct ProjectEdit {
 }
 
 /// 卡片编辑任务的表单状态（纯内存，不持久化；`App.todo_edit = None` 表示无卡片处于编辑态）。
-/// 编辑态卡片即"当前任务"：标题 / 描述 / 项目 / 截止时间可修改，时间字段保持只读。
+/// 编辑态卡片即"当前任务"：标题 / 描述 / 项目 / 类型 / 截止时间可修改，时间字段保持只读。
 #[derive(Debug, Clone)]
 pub struct TodoEdit {
     /// 正在编辑的任务 id
@@ -428,6 +476,8 @@ pub struct TodoEdit {
     pub priority: Option<Priority>,
     /// 所属项目（`None` = 无项目）
     pub project_id: Option<Uuid>,
+    /// 任务类型（`None` = 无类型）
+    pub type_id: Option<Uuid>,
     /// 截止时间输入框的原文 + 实时解析结果
     pub due: ParsedField,
 }
@@ -532,8 +582,12 @@ pub struct App {
     pub todos: Vec<Todo>,
     /// 项目列表，保持创建顺序
     pub projects: Vec<Project>,
+    /// 类型列表，保持创建顺序（内建种子在前）
+    pub types: Vec<TodoType>,
     /// 当前筛选的项目（`None` = 全部）
     pub selected_project: Option<Uuid>,
+    /// 当前筛选的类型（`None` = 全部；与项目筛选 AND 叠加）
+    pub selected_type: Option<Uuid>,
     /// 加载 / 保存出错时的提示
     pub error: Option<String>,
     /// "当前时间"，由每秒的时钟订阅刷新，用于实时耗时显示
@@ -542,6 +596,8 @@ pub struct App {
     pub add_dialog: Option<AddDialog>,
     /// 弹窗添加项目表单（`None` = 弹窗关闭；纯内存状态，不持久化）
     pub project_dialog: Option<ProjectDialog>,
+    /// 弹窗添加类型表单（`None` = 弹窗关闭；纯内存状态，不持久化）
+    pub type_dialog: Option<TypeDialog>,
     /// 已完成归档弹窗是否打开（纯 UI 状态，不持久化）
     pub show_completed: bool,
     /// 完成统计弹窗是否打开（纯 UI 状态，不持久化）
@@ -552,6 +608,8 @@ pub struct App {
     pub add_menu_open: bool,
     /// 项目编辑面板表单（`None` = 未处于编辑态；纯内存状态，不持久化）
     pub project_edit: Option<ProjectEdit>,
+    /// 类型栏编辑面板表单（`None` = 未处于编辑态；纯内存状态，不持久化）
+    pub type_edit: Option<TypeEdit>,
     /// 卡片编辑表单（`None` = 无卡片处于编辑态；纯内存状态，不持久化）
     pub todo_edit: Option<TodoEdit>,
     /// 任务排序方式（**持久化偏好**，启动经 `Loaded` 恢复，缺省「综合」）
@@ -570,16 +628,20 @@ impl Default for App {
         Self {
             todos: Vec::new(),
             projects: Vec::new(),
+            types: Vec::new(),
             selected_project: None,
+            selected_type: None,
             error: None,
             now: Utc::now(),
             add_dialog: None,
             project_dialog: None,
+            type_dialog: None,
             show_completed: false,
             show_stats: false,
             stats_dimension: StatsDimension::default(),
             add_menu_open: false,
             project_edit: None,
+            type_edit: None,
             todo_edit: None,
             sort_mode: SortMode::default(),
             project_sort_mode: SortMode::default(),
@@ -886,11 +948,13 @@ mod tests {
         let now = dt(1_700_000_000);
         let due = dt(1_700_100_000);
         let project = Uuid::now_v7();
+        let r#type = Uuid::now_v7();
         let todo = Todo::new_full(
             "写方案".into(),
             "详细描述".into(),
             Some(Priority::High),
             Some(project),
+            Some(r#type),
             Some(due),
             now,
         );
@@ -899,14 +963,16 @@ mod tests {
         assert_eq!(todo.description, "详细描述");
         assert_eq!(todo.priority, Some(Priority::High));
         assert_eq!(todo.project_id, Some(project));
+        assert_eq!(todo.type_id, Some(r#type));
         assert_eq!(todo.due_at, Some(due));
         assert_eq!(todo.created_at, now);
         assert_eq!(todo.status(), TodoStatus::Pending);
 
-        // 无优先级、无项目、无截止时间同样合法
-        let plain = Todo::new_full("简单任务".into(), "".into(), None, None, None, now);
+        // 无优先级、无项目、无类型、无截止时间同样合法
+        let plain = Todo::new_full("简单任务".into(), "".into(), None, None, None, None, now);
         assert_eq!(plain.priority, None);
         assert_eq!(plain.project_id, None);
+        assert_eq!(plain.type_id, None);
         assert_eq!(plain.due_at, None);
     }
 
@@ -1044,6 +1110,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn new_todo_has_no_type() {
+        let todo = Todo::new("无类型".into(), dt(1_700_000_000));
+        assert_eq!(todo.type_id, None);
+    }
+
+    #[test]
+    fn todo_type_new_full_records_name_and_time() {
+        let now = dt(1_700_000_000);
+        let r#type = TodoType::new_full("工作".into(), now);
+
+        assert_eq!(r#type.name, "工作");
+        assert_eq!(r#type.created_at, now);
+        assert_ne!(r#type.id, TodoType::new_full("学习".into(), now).id); // id 唯一
+    }
+
+    #[test]
+    fn app_defaults_have_no_types_or_selection() {
+        let app = App::default();
+        assert!(app.types.is_empty());
+        assert_eq!(app.selected_type, None);
+    }
+
     // ---------- ParsedField ----------
 
     #[test]
@@ -1107,6 +1196,13 @@ mod tests {
         let project = Project::new("工作".into(), dt(1_700_000_000));
         assert_eq!(project.started_at, None);
         assert_eq!(project.finished_at, None);
+    }
+
+    #[test]
+    fn todo_type_created_at_is_now() {
+        let now = dt(1_700_000_000);
+        let r#type = TodoType::new_full("生活".into(), now);
+        assert_eq!(r#type.created_at, now);
     }
 
     #[test]

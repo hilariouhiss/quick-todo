@@ -2,7 +2,8 @@
 //!
 //! 布局：标题栏（分体按钮「＋ 添加任务 ▾」，下拉菜单含「＋ 添加项目」）+ 项目单行栏
 //! （左侧排序下拉 + 横向滚动芯片）+ 任务区（统一标题行：两列计数 + 右上角排序下拉 + 双列），
-//! 项目栏与任务区以卡片容器分组；右下角悬浮状态簇（摘要胶囊 +「已完成 (N)」入口）。
+//! 项目栏与任务区以卡片容器分组；底部角落条（bottom_cluster）：左下角主题指示器
+//! （Theme: Auto/Light/Dark，点击循环切换）+ 右下角分体统计（统计胶囊 +「已完成 (Y)」按钮）。
 //! 视觉规范统一由顶部「设计令牌」常量控制（字号 / 间距 / 圆角 / 按钮规格），
 //! 颜色来自命名常量 + `extended_palette()` 主题自适应（浅 / 深主题均可读）。
 //! 每个任务一张卡片：标题、状态徽章、操作按钮、只读属性展示（含项目归属），
@@ -31,6 +32,15 @@ const DONE: Color = Color::from_rgb(0.36, 0.78, 0.50);
 /// 下拉菜单距窗口顶部的偏移：内容区 padding 24 + 标题行高（26px 字号 ≈34）
 /// + 按钮垂直居中（按钮底 ≈55）+ 9px 间隙；字体 / DPI 变化时在此校准
 const ADD_MENU_TOP: f32 = 64.0;
+
+/// 分体按钮主按钮「＋ 添加任务」固定宽：文本（5 全角 + 1 半角空格 ≈ 5.5×字号 ≈71.5）
+/// + BTN_MEDIUM 左右内边距 24 + 4px 裁剪余量（字形度量偏差时防裁剪；不影响对齐）
+const ADD_MAIN_WIDTH: f32 = FONT_BODY * 5.5 + BTN_MEDIUM.left + BTN_MEDIUM.right + 4.0;
+/// 分体按钮箭头「▾」固定宽：字形（≈ 字号）+ BTN_ARROW 左右内边距 16 + 4px 余量
+const ADD_ARROW_WIDTH: f32 = FONT_BODY + BTN_ARROW.left + BTN_ARROW.right + 4.0;
+/// 分体按钮总宽（主按钮 + 箭头 + 1px 间距）；下拉菜单「＋ 添加项目」与其等宽——
+/// 菜单右缘与组合右缘均贴窗口右缘 − 24px，等宽即左右边缘与文字起点三方对齐
+const ADD_BUTTONS_WIDTH: f32 = ADD_MAIN_WIDTH + ADD_ARROW_WIDTH + 1.0;
 
 // ---------- 设计令牌（统一视觉规范）----------
 
@@ -260,33 +270,25 @@ const BOLD: Font = Font {
     ..Font::DEFAULT
 };
 
-/// 应用主视图：标题栏（分体按钮 + 下拉菜单）+ 项目单行栏 + 双列任务区；右下角悬浮状态簇。
+/// 应用主视图：标题栏（分体按钮 + 下拉菜单）+ 项目单行栏 + 双列任务区；底部角落条（左下主题指示器 + 右下分体统计）。
 /// 任一弹窗（任务添加 / 项目添加编辑 / 已完成归档）打开时，叠加模态遮罩与弹窗卡片。
 pub fn view(app: &App) -> Element<'_, Message> {
-    // 标题栏：左侧标题；右端主题切换按钮 + 分体按钮（「＋ 添加任务」主按钮 + 「▾」下拉箭头，
-    // 下拉菜单含「＋ 添加项目」入口）；摘要移至右下角状态簇（status_cluster）
+    // 标题栏：左侧标题；右端分体按钮（「＋ 添加任务」主按钮 + 「▾」下拉箭头，
+    // 下拉菜单含「＋ 添加项目」入口）；主题指示器与任务统计移至底部角落条（bottom_cluster）
     let header = row![
         text("待办清单").size(FONT_TITLE).font(BOLD),
         Space::new().width(Length::Fill),
-        // 主题切换：循环 跟随系统 → 浅色 → 深色（偏好持久化）
-        tooltip(
-            button(text(app.theme_mode.label()).size(FONT_SMALL))
-                .on_press(Message::CycleThemeMode)
-                .style(button::text)
-                .padding(BTN_SMALL),
-            text("点击切换主题（跟随系统 / 浅色 / 深色）").size(FONT_SMALL),
-            tooltip::Position::Bottom,
-        ),
-        Space::new().width(SPACE_M),
         row![
             button(text("＋ 添加任务").size(FONT_BODY))
                 .on_press(Message::OpenAddDialog)
                 .style(button::primary)
-                .padding(BTN_MEDIUM),
+                .padding(BTN_MEDIUM)
+                .width(Length::Fixed(ADD_MAIN_WIDTH)),
             button(text("▾").size(FONT_BODY))
                 .on_press(Message::ToggleAddMenu)
                 .style(button::primary)
-                .padding(BTN_ARROW),
+                .padding(BTN_ARROW)
+                .width(Length::Fixed(ADD_ARROW_WIDTH)),
         ]
         .spacing(1)
         .align_y(Alignment::Center),
@@ -342,12 +344,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .padding(PADDING_PAGE)
         .center_x(Length::Fill);
 
-    // 右下角悬浮状态簇（摘要 + 「已完成 (N)」入口；叠加在内容之上、弹窗遮罩之下）
+    // 底部角落条（左下主题指示器 + 右下分体统计；叠加在内容之上、弹窗遮罩之下）
     // 下拉菜单展开时：再叠 透明捕获层（点击外部关闭，无压暗）+ 右上角菜单卡片（最顶层）
     let content = if app.add_menu_open {
         stack![
             base,
-            status_cluster(app),
+            bottom_cluster(app),
             mouse_area(
                 container(Space::new())
                     .width(Length::Fill)
@@ -369,7 +371,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
     } else {
-        stack![base, status_cluster(app)]
+        stack![base, bottom_cluster(app)]
             .width(Length::Fill)
             .height(Length::Fill)
     };
@@ -725,7 +727,7 @@ fn form_field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Ele
         .into()
 }
 
-/// 顶部摘要：总数 / 进行中 / 已完成。
+/// 右下角统计胶囊文案：总数 / 进行中（已完成计数在「已完成 (Y)」按钮上，见 `stats_group`）。
 fn summary(app: &App) -> String {
     let total = app.todos.len();
     let in_progress = app
@@ -733,12 +735,7 @@ fn summary(app: &App) -> String {
         .iter()
         .filter(|todo| todo.status() == TodoStatus::InProgress)
         .count();
-    let done = app
-        .todos
-        .iter()
-        .filter(|todo| todo.status() == TodoStatus::Done)
-        .count();
-    format!("共 {total} 项 · 进行中 {in_progress} · 已完成 {done}")
+    format!("共 {total} 项 · 进行中 {in_progress}")
 }
 
 /// 空列表提示（整区空 / 组内空均垂直居中）。
@@ -1023,43 +1020,68 @@ fn project_edit_panel(app: &App) -> Element<'_, Message> {
 // ---------- 标题栏添加下拉菜单 ----------
 
 /// 标题栏分体按钮的下拉菜单：右上角悬浮（无压暗、无卡片包裹），
-/// 「＋ 添加项目」与主按钮「＋ 添加任务」同款 primary 样式、同尺寸。
+/// 「＋ 添加项目」与主按钮「＋ 添加任务」同款 primary 样式；宽度与分体按钮总宽一致
+/// （`ADD_BUTTONS_WIDTH`），左右边缘与文字起点三方对齐，避免错位割裂。
 /// 点击菜单项打开项目弹窗（弹窗互斥逻辑不变，update 层自动收起菜单）。
 fn add_menu_card() -> Element<'static, Message> {
-    button(text("＋ 添加项目").size(FONT_BODY))
-        .on_press(Message::OpenProjectDialog)
-        .style(button::primary)
-        .padding(BTN_MEDIUM)
-        .into()
+    container(
+        button(text("＋ 添加项目").size(FONT_BODY))
+            .on_press(Message::OpenProjectDialog)
+            .style(button::primary)
+            .padding(BTN_MEDIUM)
+            .width(Length::Fill),
+    )
+    .width(Length::Fixed(ADD_BUTTONS_WIDTH))
+    .into()
 }
 
-// ---------- 右下角状态簇 ----------
+// ---------- 底部角落条 ----------
 
-/// 右下角悬浮状态簇：摘要胶囊（弱色底）+「已完成 (N)」按钮，叠加在内容区右下角（弹窗遮罩之下）。
-fn status_cluster(app: &App) -> Element<'_, Message> {
-    let count = app
-        .todos
-        .iter()
-        .filter(|todo| todo.status() == TodoStatus::Done)
-        .count();
+/// 底部角落条：左下角主题指示器 + 右下角分体统计，悬浮于内容区底部（弹窗遮罩之下）。
+fn bottom_cluster(app: &App) -> Element<'_, Message> {
     container(
         row![
-            container(text(summary(app)).size(FONT_SMALL).color(MUTED))
-                .padding([SPACE_XS, SPACE_M])
-                .style(summary_pill_style),
-            Space::new().width(SPACE_M),
-            button(text(format!("已完成 ({count})")).size(FONT_BODY))
-                .on_press(Message::OpenCompletedDialog)
-                .style(button::secondary)
-                .padding(BTN_FAB),
+            theme_indicator(app),
+            Space::new().width(Length::Fill),
+            stats_group(app),
         ]
         .align_y(Alignment::Center),
     )
     .width(Length::Fill)
     .height(Length::Fill)
-    .align_x(Alignment::End)
     .align_y(Alignment::End)
     .padding(SPACE_XL)
+    .into()
+}
+
+/// 左下角主题指示器：`Theme: Auto/Light/Dark`（无 tooltip），点击循环切换主题模式。
+fn theme_indicator(app: &App) -> Element<'_, Message> {
+    button(text(format!("Theme: {}", app.theme_mode.label())).size(FONT_SMALL))
+        .on_press(Message::CycleThemeMode)
+        .style(button::text)
+        .padding(BTN_SMALL)
+        .into()
+}
+
+/// 右下角分体统计：左侧统计胶囊（纯展示，不可点）+ 右侧「已完成 (Y)」按钮（打开归档弹窗）。
+/// 两段 1px 衔接、同高（13px 字号 + 16px 垂直内边距 = 29px），视觉上为一个整体。
+fn stats_group(app: &App) -> Element<'_, Message> {
+    let done = app
+        .todos
+        .iter()
+        .filter(|todo| todo.status() == TodoStatus::Done)
+        .count();
+    row![
+        container(text(summary(app)).size(FONT_BODY).color(MUTED))
+            .padding([8.0, SPACE_L])
+            .style(summary_pill_style),
+        button(text(format!("已完成 ({done})")).size(FONT_BODY))
+            .on_press(Message::OpenCompletedDialog)
+            .style(button::secondary)
+            .padding(BTN_FAB),
+    ]
+    .spacing(1)
+    .align_y(Alignment::Center)
     .into()
 }
 

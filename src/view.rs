@@ -22,7 +22,7 @@ use iced::widget::{
 use iced::{Alignment, Background, Border, Color, Element, Font, Length};
 use uuid::Uuid;
 
-use crate::model::{App, Priority, Project, QuickDue, SortMode, Todo, TodoStatus};
+use crate::model::{App, Priority, Project, QuickDue, SortMode, ThemeMode, Todo, TodoStatus};
 use crate::update::Message;
 use crate::validate;
 use theme::{SemColors, extended, sem, sem_colors};
@@ -1621,5 +1621,212 @@ fn format_duration(d: Duration) -> String {
         (0, 0) => format!("{seconds} 秒"),
         (0, _) => format!("{minutes} 分 {seconds} 秒"),
         _ => format!("{hours} 小时 {minutes} 分 {seconds} 秒"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{AddDialog, ParsedField, ProjectDialog, ProjectEdit, TodoEdit};
+    use chrono::TimeZone;
+
+    fn dt(secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(secs, 0).unwrap()
+    }
+
+    /// 渲染冒烟断言：构造**状态一致**（弹窗开则表单在、编辑态指向存在的实体）的 App，
+    /// `view(&app)` 构建元素树不 panic（渲染守卫 `expect` 依赖这些不变量）。
+    fn renders(app: &App) {
+        drop(view(app));
+    }
+
+    fn sample_app() -> App {
+        App {
+            now: dt(1_700_000_000),
+            ..App::default()
+        }
+    }
+
+    /// 全字段任务：进行中（带开始时间）。
+    fn in_progress_todo(app: &App, title: &str) -> Todo {
+        let mut todo = Todo::new_full(
+            title.into(),
+            "描述".into(),
+            Some(Priority::High),
+            None,
+            Some(dt(1_700_100_000)),
+            app.now,
+        );
+        todo.started_at = Some(dt(1_700_000_100));
+        todo
+    }
+
+    /// 全字段已完成任务（带开始 / 结束时间）。
+    fn done_todo(app: &App, title: &str) -> Todo {
+        let mut todo = in_progress_todo(app, title);
+        todo.finished_at = Some(dt(1_700_000_500));
+        todo
+    }
+
+    #[test]
+    fn view_renders_empty_app() {
+        renders(&sample_app());
+    }
+
+    #[test]
+    fn view_renders_todos_projects_and_error() {
+        let mut app = sample_app();
+        let project = Project::new_full(
+            "工作".into(),
+            Some(Priority::Medium),
+            Some(dt(1_699_000_000)),
+            Some(dt(1_700_200_000)),
+            app.now,
+        );
+        let project_id = project.id;
+        app.projects.push(project);
+        let pending = Todo::new_full(
+            "写方案".into(),
+            "先读需求".into(),
+            Some(Priority::High),
+            Some(project_id),
+            Some(dt(1_700_100_000)),
+            app.now,
+        );
+        // 保持新任务在最前（生产语义：insert(0)）
+        let _ = pending.id;
+        let mut in_progress = in_progress_todo(&app, "编码");
+        in_progress.project_id = Some(project_id);
+        let done = done_todo(&app, "已读文档");
+        app.todos = vec![pending, in_progress, done];
+        app.selected_project = Some(project_id);
+        app.sort_mode = SortMode::Priority;
+        app.project_sort_mode = SortMode::Due;
+        app.error = Some("测试错误横幅".into());
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_task_dialog() {
+        let mut app = sample_app();
+        app.projects
+            .push(Project::new_full("工作".into(), None, None, None, app.now));
+        let mut dialog = AddDialog::default();
+        dialog.title = "写方案".into();
+        dialog.description = "先读需求".into();
+        dialog.project_id = Some(app.projects[0].id);
+        dialog.priority = Some(Priority::Low);
+        dialog.due = ParsedField::changed("2026-01-31 18:30".into());
+        app.add_dialog = Some(dialog);
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_task_dialog_with_due_error() {
+        // 截止时间非法：红字提示路径
+        let mut app = sample_app();
+        let mut dialog = AddDialog::default();
+        dialog.title = "写方案".into();
+        dialog.due = ParsedField::changed("后天".into());
+        app.add_dialog = Some(dialog);
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_project_dialog() {
+        let mut app = sample_app();
+        app.projects
+            .push(Project::new_full("工作".into(), None, None, None, app.now));
+        let mut dialog = ProjectDialog::default();
+        dialog.name = "  生活  ".into();
+        dialog.priority = Some(Priority::High);
+        dialog.start = ParsedField::changed("2026-01-01".into());
+        dialog.end = ParsedField::changed("2026-01-31".into());
+        app.project_dialog = Some(dialog);
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_completed_dialog() {
+        let mut app = sample_app();
+        app.todos.push(done_todo(&app, "已完成任务"));
+        app.show_completed = true;
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_add_menu() {
+        let mut app = sample_app();
+        app.add_menu_open = true;
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_project_edit_panel() {
+        let mut app = sample_app();
+        let project = Project::new_full(
+            "工作".into(),
+            None,
+            Some(dt(1_699_000_000)),
+            Some(dt(1_700_200_000)),
+            app.now,
+        );
+        app.projects.push(project);
+        app.project_edit = Some(ProjectEdit {
+            project_id: app.projects[0].id,
+            name: "工作".into(),
+            priority: None,
+            start: ParsedField::prefilled(Some(dt(1_699_000_000))),
+            end: ParsedField::prefilled(Some(dt(1_700_200_000))),
+        });
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_todo_edit_card() {
+        let mut app = sample_app();
+        let todo = Todo::new_full("写方案".into(), String::new(), None, None, None, app.now);
+        app.todos.push(todo);
+        app.todo_edit = Some(TodoEdit {
+            todo_id: app.todos[0].id,
+            title: "写方案".into(),
+            description: String::new(),
+            priority: None,
+            project_id: None,
+            due: ParsedField::new(),
+        });
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_stacked_quick_project_dialog() {
+        // 任务弹窗内「＋ 新建」：项目弹窗叠加于任务弹窗之上（顶层优先渲染）
+        let mut app = sample_app();
+        let mut add = AddDialog::default();
+        add.title = "写方案".into();
+        app.add_dialog = Some(add);
+        app.project_dialog = Some(ProjectDialog::default());
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_dark_theme_with_all_states() {
+        // 深色主题（系统深色 + 手动 Dark）下语义色取板路径
+        let mut app = sample_app();
+        app.theme_mode = ThemeMode::Dark;
+        app.system_dark = true;
+        app.todos.push(in_progress_todo(&app, "进行中"));
+        app.error = Some("深色错误横幅".into());
+        renders(&app);
+    }
+
+    #[test]
+    fn view_renders_filtered_empty_groups() {
+        // 整区空（有筛选无任务）与组内空的提示路径
+        let mut app = sample_app();
+        app.projects
+            .push(Project::new_full("工作".into(), None, None, None, app.now));
+        app.selected_project = Some(app.projects[0].id);
+        renders(&app);
     }
 }

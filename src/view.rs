@@ -1854,8 +1854,9 @@ fn grouped_columns<'a>(app: &'a App, todos: Vec<&'a Todo>) -> Element<'a, Messag
     if todos.is_empty() {
         return empty_hint(
             app,
-            if app.selected_project.is_some() {
-                "该项目暂无任务"
+            if app.selected_project.is_some() || app.selected_type.is_some() {
+                // 项目 / 类型筛选（或叠加）下无匹配任务：中性文案
+                "暂无匹配任务"
             } else {
                 "暂无任务，先添加一个吧"
             },
